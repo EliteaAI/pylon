@@ -1,0 +1,35 @@
+FROM python:3.12-alpine
+WORKDIR /usr/src/app
+
+RUN set -x \
+  && apk add bash dumb-init supervisor vim alpine-sdk git libpq-dev postgresql-client libffi-dev curl dos2unix
+
+RUN set -x \
+  && curl -q http://zerossl.crt.sectigo.com/ZeroSSLRSADomainSecureSiteCA.crt | openssl x509 > /usr/local/share/ca-certificates/ZeroSSLRSADomainSecureSiteCA.crt \
+  && update-ca-certificates
+
+ARG PIP_ARGS="--no-cache-dir"
+RUN set -x \
+  && pip install $PIP_ARGS --upgrade pip
+
+COPY ./requirements.txt ./requirements.txt
+RUN set -x \
+  && pip install $PIP_ARGS -r ./requirements.txt \
+  && rm ./requirements.txt
+
+COPY ./ ./.git ./pylon/
+RUN set -x \
+  && pip install $PIP_ARGS ./pylon \
+  && rm -r ./pylon
+
+COPY ./supervisord.conf /usr/local/etc/supervisord.conf
+RUN set -x \
+  && dos2unix /usr/local/etc/supervisord.conf \
+  && chmod 644 /usr/local/etc/supervisord.conf
+
+COPY ./entrypoint.sh /usr/local/sbin/entrypoint.sh
+RUN set -x \
+  && dos2unix /usr/local/sbin/entrypoint.sh \
+  && chmod 755 /usr/local/sbin/entrypoint.sh
+
+CMD [ "bash", "/usr/local/sbin/entrypoint.sh" ]
