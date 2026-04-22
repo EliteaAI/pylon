@@ -119,7 +119,7 @@ class SubpylonInstance:
         if self.config.get("restart") is not None:
             return bool(self.config.get("restart"))
         #
-        return self.context.server_mode != "oneshot"
+        return self.context.server_mode not in ["oneshot", "preload"]
 
     def _set_external_pid(self, pid, present):
         if not hasattr(self.context, "zombie_reaper"):
@@ -211,7 +211,7 @@ class SubpylonInstance:
             process = self.process
         #
         if process is not None:
-            if self.context.server_mode == "oneshot":
+            if self.context.server_mode in ["oneshot", "preload"]:
                 log.info("Waiting for %s to exit (oneshot mode)", self.name)
                 try:
                     process.wait(timeout=self.oneshot_wait)
