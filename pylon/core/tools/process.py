@@ -85,9 +85,9 @@ class SubpylonInstance:
         #
         self.name = self.config.get("name", "subpylon")
         self.cwd = self.config.get("cwd", os.getcwd())
-        self.restart_delay = float(self.config.get("restart_delay", 1.0))
-        self.stop_timeout = float(self.config.get("stop_timeout", 10.0))
-        self.oneshot_wait = float(self.config.get("oneshot_wait", 60.0 * 15))
+        self.restart_delay = float(self.config.get("restart_delay", 5.0))
+        self.stop_timeout = float(self.config.get("stop_timeout", 120.0))
+        self.oneshot_wait = float(self.config.get("oneshot_wait", 60.0 * 120))
         #
         self.process = None
         self._state_lock = threading.Lock()
@@ -205,20 +205,23 @@ class SubpylonInstance:
 
     def stop(self):
         """ Stop """
+        if self.context.server_mode in ["oneshot", "preload"]:
+            with self._state_lock:
+                process = self.process
+            #
+            if process is not None:
+                log.info("Waiting for %s to exit (oneshot mode)", self.name)
+                try:
+                    process.wait(timeout=self.oneshot_wait)
+                except:  # pylint: disable=W0702
+                    pass
+        #
         self._stop_event.set()
         #
         with self._state_lock:
             process = self.process
         #
-        if process is not None:
-            if self.context.server_mode in ["oneshot", "preload"]:
-                log.info("Waiting for %s to exit (oneshot mode)", self.name)
-                try:
-                    process.wait(timeout=self.oneshot_wait)
-                    return
-                except:  # pylint: disable=W0702
-                    pass
-            #
+        if process is not None and process.poll() is None:
             log.info("Stopping %s (pid=%s)", self.name, process.pid)
             try:
                 os.killpg(process.pid, signal.SIGTERM)
