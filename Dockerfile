@@ -24,7 +24,6 @@ RUN set -x \
       fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf fonts-freefont-ttf \
       dos2unix \
       poppler-data poppler-utils libpoppler-cpp2 libpoppler-glib8t64 \
-      tesseract-ocr-all \
       ripgrep fzf \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
