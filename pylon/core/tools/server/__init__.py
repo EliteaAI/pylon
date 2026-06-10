@@ -20,6 +20,7 @@
 
 from .init import (
     init_context,
+    _init_router_only,
     run_server,
     restart,
 )

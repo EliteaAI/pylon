@@ -74,8 +74,63 @@ def init_context(context):
             if not health_log:
                 context.server_log_filter.filter_strings.append(f"GET /{endpoint}")
     #
+    # Early server start: gevent proxy or traditional gevent
+    proxy_config = context.settings.get("server", {}).get("proxy", {})
+    proxy_mode = proxy_config.get("mode", False)
+    #
     if context.web_runtime == "gevent" and context.server_mode == "web":
-        early_run_server(context)
+        if proxy_mode:
+            # Proxy mode: start the gevent proxy server early
+            from .gevent_proxy import make_proxy_server  # pylint: disable=C0415
+            from .splash import boot_splash_hook  # pylint: disable=C0415
+            #
+            context.root_router.hooks.append(boot_splash_hook)
+            context.http_server = make_proxy_server(context)
+            context.http_server.start()
+        else:
+            early_run_server(context)
+    elif context.web_runtime == "gevent_worker" and context.server_mode in ["web", "worker"]:
+        # Worker mode: no early server start, the worker will register RPC functions
+        pass
+
+
+def _init_router_only(context):
+    """
+    Initialize the root router and health endpoints WITHOUT starting an HTTP server.
+    
+    Used by the worker process in proxy mode — the worker connects to the proxy's
+    broker via ZMQ and does not listen on any HTTP port.
+    """
+    context.server_mode = context.settings.get("server", {}).get("mode", "web")
+    #
+    context.url_prefix = context.settings.get("server", {}).get("path", "/")
+    while context.url_prefix.endswith("/"):
+        context.url_prefix = context.url_prefix[:-1]
+    #
+    context.is_async = False  # Worker always uses sync WSGI
+    #
+    context.server_log_filter = log.Filter()
+    logging.getLogger("server").addFilter(context.server_log_filter)
+    logging.getLogger("werkzeug").addFilter(context.server_log_filter)
+    logging.getLogger("geventwebsocket.handler").addFilter(context.server_log_filter)
+    #
+    # Root router
+    from .wsgi import RouterApp  # pylint: disable=C0415
+    context.root_router = RouterApp()
+    #
+    # Health endpoints
+    health_config = context.settings.get("server", {}).get("health", {})
+    health_log = health_config.get("log", False)
+    #
+    from .wsgi import ok_app  # pylint: disable=C0415
+    #
+    for endpoint in ["healthz", "livez", "readyz"]:
+        if health_config.get(endpoint, False):
+            log.info("Adding %s endpoint", endpoint)
+            context.root_router.map[f"/{endpoint}/"] = ok_app
+            #
+            if not health_log:
+                context.server_log_filter.filter_strings.append(f"GET /{endpoint}")
 
 
 def early_run_server(context):
@@ -94,7 +149,12 @@ def run_server(context):
     if context.server_mode == "web":
         log.info("Starting %s server", context.web_runtime)
         #
-        runtime = importlib.import_module(f"pylon.core.tools.server.{context.web_runtime}")
+        # Map gevent_worker runtime to the gevent server module (which handles both)
+        runtime_name = context.web_runtime
+        if runtime_name == "gevent_worker":
+            runtime_name = "gevent"
+        #
+        runtime = importlib.import_module(f"pylon.core.tools.server.{runtime_name}")
         runtime.run_server(context)
     elif context.server_mode == "block":
         log.info("Blocking until stop_event is set")
@@ -110,7 +170,7 @@ def restart():
     #
     restart_method = context.settings.get("server", {}).get("restart_method", None)
     if restart_method is None:
-        if context.web_runtime == "gevent":
+        if context.web_runtime in ["gevent", "gevent_worker"]:
             restart_method = "stop_event"
         else:
             restart_method = "subprocess"
@@ -128,7 +188,7 @@ def restart():
             ["/bin/bash", "-c", f"bash -c 'sleep 1; kill {pylon_pid}' &"]
         )
     else:  # signal
-        if context.web_runtime == "gevent":
+        if context.web_runtime in ["gevent", "gevent_worker"]:
             context.stop_event.set()  # Act as in stop_event
         else:
             os.kill(pylon_pid, signal.SIGTERM)
