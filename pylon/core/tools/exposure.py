@@ -378,7 +378,7 @@ def on_sio(event, namespace, args):
         args[1] = rpc_environ
         args = tuple(args)
     #
-    for reg_id in context.exposure.registry.values():
+    for reg_id in list(context.exposure.registry.values()):
         try:
             context.exposure.rpc_node.call_with_timeout(
                 f"{reg_id}_sio_call",
