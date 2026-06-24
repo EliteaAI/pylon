@@ -27,7 +27,7 @@ import getpass
 
 import dulwich  # pylint: disable=E0401
 from dulwich import refs, repo, porcelain, client, file  # pylint: disable=E0401
-from dulwich.contrib.paramiko_vendor import ParamikoSSHVendor  # pylint: disable=E0401
+from pylon.vendor.dulwich.contrib.paramiko_vendor import ParamikoSSHVendor  # pylint: disable=E0401
 
 import paramiko  # pylint: disable=E0401
 import paramiko.transport  # pylint: disable=E0401
