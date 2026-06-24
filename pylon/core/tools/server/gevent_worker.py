@@ -24,8 +24,20 @@
     processing. It hosts the Flask app hierarchy and SocketIO event handlers,
     communicating with the proxy process via ZMQ IPC.
     
-    The worker registers wsgi_call and sio_call RPC functions that the proxy
-    calls for each incoming HTTP request or SocketIO event.
+    WebSocket bridging architecture:
+    
+    The proxy accepts WebSocket connections locally (gevent) and forwards
+    events bidirectionally with the worker via ZeroMQ EventNode.
+    
+    PROXY:   WS recv → EventNode emit "ws_event" → WORKER: eio._handle_ws()
+    WORKER:  eio.send() → EventNode emit "ws_response_{sid}" → PROXY: WS send
+    
+    This allows the worker to process SocketIO events without holding open
+    TCP connections, while the proxy efficiently manages 1000s of concurrent
+    WebSocket connections using gevent.
+    
+    The worker monkey-patches engineio.Server.send() to forward responses
+    via EventNode instead of writing to the transport.
 """
 
 import io
@@ -44,7 +56,8 @@ from pylon.core.tools import log
 def run_worker_server(context):
     """ Run the worker server that processes requests forwarded from the proxy """
     #
-    # Start the ZMQ listener that registers wsgi_call and sio_call RPC functions
+    # Start the ZMQ listener that registers wsgi_call and RPC functions,
+    # subscribes to WebSocket events, and monkey-patches EngineIO.
     worker = GeventWorker(context)
     worker.start()
     #
@@ -56,11 +69,10 @@ def run_worker_server(context):
 
 class GeventWorker:
     """
-    Worker process that registers WSGI and SocketIO call handlers via ZMQ RPC.
-    
-    The proxy process connects to this worker via a ZeroMQ EventNode and calls
-    the registered functions for each incoming request. This worker uses native
-    threads (not gevent) so CPU-bound tasks can utilize multiple cores.
+    Worker process that:
+    1. Handles HTTP requests via ZMQ RPC (wsgi_call)
+    2. Bridges WebSocket events via ZMQ EventNode (ws_event / ws_response)
+    3. Monkey-patches engineio.Server.send() to forward emits via EventNode
     """
 
     def __init__(self, context):
@@ -81,9 +93,11 @@ class GeventWorker:
         self.event_node = None
         self.rpc_node = None
         self.started = False
+        # Reference to the EngineIO server for monkey-patching
+        self._eio = None
 
     def start(self):
-        """ Start the ZMQ worker and register RPC functions """
+        """ Start the ZMQ worker, register RPC functions, and patch EngineIO """
         if self.started:
             return
         #
@@ -95,7 +109,7 @@ class GeventWorker:
             topic="proxy_events",
             hmac_key=None,  # No HMAC needed for local IPC
             hmac_digest="sha512",
-            callback_workers=1,
+            callback_workers=None,
             mute_first_failed_connections=0,
             log_errors=True,
         )
@@ -111,7 +125,14 @@ class GeventWorker:
         # Register RPC functions using the shared prefix so proxy can call them
         self.rpc_node.register(self._ping, name=f"{self.rpc_prefix}_ping")
         self.rpc_node.register(self._wsgi_call, name=f"{self.rpc_prefix}_wsgi_call")
-        self.rpc_node.register(self._sio_call, name=f"{self.rpc_prefix}_sio_call")
+        #
+        # Apply EngineIO monkey-patch so socketio.emit() sends via EventNode
+        self._patch_engineio_send()
+        #
+        # Subscribe to WebSocket events from proxy
+        self.event_node.subscribe("ws_open", self._on_ws_open)
+        self.event_node.subscribe("ws_event", self._on_ws_event)
+        self.event_node.subscribe("ws_close", self._on_ws_close)
         #
         self.started = True
         log.info("Worker registered RPC functions and is ready")
@@ -125,6 +146,107 @@ class GeventWorker:
             self.event_node.stop()
         #
         self.started = False
+
+    def _patch_engineio_send(self):
+        """
+        Monkey-patch engineio.Server.send() to forward responses via EventNode
+        instead of writing to the transport.
+        
+        This allows SocketIO event handlers in the worker to call sio.emit(),
+        which goes through EngineIO send(), and have the data sent to the
+        correct WebSocket connection in the proxy.
+        """
+        import engineio  # pylint: disable=E0401,C0415
+        #
+        # Store original send method
+        self._original_eio_send = engineio.Server.send
+        #
+        # Reference to our event_node for use in the patched method
+        _self = self
+        #
+        def _patched_send(eio_self, sid, data):
+            """ Forward EngineIO send() via EventNode to proxy """
+            en = getattr(eio_self, '_pylon_event_node', None)
+            if en is not None:
+                en.emit(f"ws_response_{sid}", {"data": data})
+            else:
+                # Fallback to original send
+                _self._original_eio_send(eio_self, sid, data)
+        #
+        engineio.Server.send = _patched_send
+        #
+        # If context.sio already exists, attach our event_node to its eio
+        if self.context.sio is not None:
+            self._eio = self.context.sio.eio
+            self._eio._pylon_event_node = self.event_node
+
+    def _on_ws_open(self, event_name, payload):
+        """
+        Handle WebSocket connection open event from proxy.
+        
+        Creates a virtual EngineIO socket entry so that subsequent
+        ws_event messages can be processed through EngineIO's _handle_ws().
+        """
+        sid = payload.get("sid")
+        environ = payload.get("environ", {})
+        #
+        if self.context.sio is None:
+            return
+        #
+        eio = self.context.sio.eio
+        #
+        # Create a virtual EngineIO socket entry
+        # _get_socket(sid) creates a Socket if it doesn't exist
+        sock = eio._get_socket(sid)  # pylint: disable=W0212
+        #
+        # Set transport to websocket
+        sock.transport = "websocket"
+        #
+        # Attach our event_node so _patched_send can find it
+        eio._pylon_event_node = self.event_node
+
+    def _on_ws_event(self, event_name, payload):
+        """
+        Handle WebSocket message event from proxy.
+        
+        Processes the raw EngineIO frame text through EngineIO's _handle_ws(),
+        which triggers the SocketIO event handler chain.
+        Any emits from handlers are captured by our monkey-patched send().
+        """
+        sid = payload.get("sid")
+        data = payload.get("data")
+        #
+        if self.context.sio is None or sid is None or data is None:
+            return
+        #
+        eio = self.context.sio.eio
+        #
+        # Ensure event_node is attached
+        eio._pylon_event_node = self.event_node
+        #
+        # Process the raw EngineIO frame through EngineIO's WebSocket handler.
+        # This parses the frame, dispatches to SocketIO, and runs event handlers.
+        try:
+            eio._handle_ws(sid, data)  # pylint: disable=W0212
+        except Exception:  # pylint: disable=W0703
+            log.exception("Worker WS event processing error")
+
+    def _on_ws_close(self, event_name, payload):
+        """
+        Handle WebSocket connection close event from proxy.
+        
+        Removes the virtual EngineIO socket entry.
+        """
+        sid = payload.get("sid")
+        #
+        if self.context.sio is None:
+            return
+        #
+        eio = self.context.sio.eio
+        #
+        # Remove the virtual socket
+        if sid in eio.sockets:
+            del eio.sockets[sid]
 
     def _ping(self):
         """ Respond to proxy health checks """
@@ -164,8 +286,10 @@ class GeventWorker:
         #
         data = None
         #
+        # Use root_router (not app_router_wsgi) because it has both the app_router
+        # route AND the SocketIO route registered. app_router_wsgi only has Flask routes.
         try:
-            data = self.context.app_router_wsgi(
+            data = self.context.root_router(
                 call_environ, start_response,
             )
             for item in data:
@@ -188,14 +312,6 @@ class GeventWorker:
         #
         response["body"] = response["body"].getvalue()
         return response
-
-    def _sio_call(self, event_name, namespace, args):
-        """
-        Process a SocketIO event forwarded from the proxy.
-        
-        This function is called by the proxy via RPC when a SocketIO event
-        arrives. It triggers the registered SocketIO handlers.
-        """
         if event_name == "connect":
             # For connect events, reconstruct the WSGI environ
             call_environ = dict(args[1])

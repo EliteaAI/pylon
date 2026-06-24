@@ -27,6 +27,16 @@
     Process 2 (worker) - runs the actual Flask app hierarchy + SocketIO event handlers
     using native threads, without gevent monkey-patching. This allows CPU-bound tasks
     to use multiple cores naturally.
+    
+    WebSocket bridging:
+    The proxy accepts WebSocket connections locally (gevent), then bridges events
+    bidirectionally with the worker via ZeroMQ EventNode:
+    
+    PROXY:   WS recv → EventNode emit → WORKER: eio._handle_ws() → SocketIO handlers
+    WORKER:  eio.send() → EventNode emit → PROXY:  WS send
+    
+    This allows the worker to process SocketIO events without holding open TCP
+    connections, while the proxy efficiently manages 1000s of concurrent WS connections.
 """
 
 import io
@@ -48,18 +58,15 @@ def run_proxy_server(context):
     """ Run the gevent proxy server that forwards requests to a worker process """
     from gevent.pywsgi import WSGIServer  # pylint: disable=E0401,C0412,C0415
     from geventwebsocket.handler import WebSocketHandler  # pylint: disable=E0401,C0412,C0415
-    from .splash import boot_splash_hook  # pylint: disable=C0415
     #
     # Build the proxy WSGI app
     proxy_config = context.settings.get("server", {}).get("proxy", {})
     proxy_app = GeventProxyApp(context, proxy_config)
     #
-    # Wrap the root router with the proxy app
-    original_router = context.root_router
-    context.root_router = ProxyRouterWrapper(original_router, proxy_app)
-    #
-    if boot_splash_hook in context.root_router.hooks:
-        context.root_router.hooks.remove(boot_splash_hook)
+    # Set the proxy app as the root router directly (no ProxyRouterWrapper wrapper).
+    # In proxy mode, ALL requests go through GeventProxyApp which handles
+    # WebSocket upgrades, health endpoints, and forwards everything to worker.
+    context.root_router = proxy_app
     #
     # Make and start the gevent WSGI server
     http_server = WSGIServer(
@@ -87,7 +94,6 @@ def make_proxy_server(context):
     """ Make the gevent proxy WSGI server (early startup) """
     from gevent.pywsgi import WSGIServer  # pylint: disable=E0401,C0412,C0415
     from geventwebsocket.handler import WebSocketHandler  # pylint: disable=E0401,C0412,C0415
-    from .splash import boot_splash_hook  # pylint: disable=C0415
     #
     proxy_config = context.settings.get("server", {}).get("proxy", {})
     proxy_app = GeventProxyApp(context, proxy_config)
@@ -95,12 +101,8 @@ def make_proxy_server(context):
     # Store the proxy app on context so _proxy_main_loop can start its ZMQ connection
     context.proxy_app = proxy_app
     #
-    # Wrap the root router with the proxy app
-    original_router = context.root_router
-    context.root_router = ProxyRouterWrapper(original_router, proxy_app)
-    #
-    if boot_splash_hook in context.root_router.hooks:
-        context.root_router.hooks.remove(boot_splash_hook)
+    # Set the proxy app as the root router directly
+    context.root_router = proxy_app
     #
     http_server = WSGIServer(
         (
@@ -151,6 +153,8 @@ class GeventProxyApp:
         self.event_node = None
         self.rpc_node = None
         self.started = False
+        # Registry of active WebSocket bridges: sid → WebSocketBridge
+        self._ws_bridges = {}
 
     def start(self):
         """ Start the ZMQ proxy connection """
@@ -175,7 +179,7 @@ class GeventProxyApp:
             topic="proxy_events",
             hmac_key=self.config.get("hmac_key", None),
             hmac_digest=self.config.get("hmac_digest", "sha512"),
-            callback_workers=1,
+            callback_workers=None,
             mute_first_failed_connections=0,
             log_errors=True,
         )
@@ -226,15 +230,40 @@ class GeventProxyApp:
 
     def __call__(self, environ, start_response):
         """
-        WSGI call: forward the request to the worker via ZMQ RPC.
+        WSGI call: forward the request to the worker via ZMQ RPC,
+        OR handle WebSocket upgrade locally and bridge to worker.
         
-        Serializes the WSGI environ, calls wsgi_call on the worker,
-        and writes the response back.
+        WebSocket upgrades are detected by HTTP_UPGRADE header.
+        We create a WebSocket from the raw socket (stored in werkzeug.socket
+        by _http_server_pre_start_hook) and bridge to the worker via EventNode.
+        
+        Health endpoints (/healthz/, /livez/, /readyz/) are handled locally.
         """
         if not self.started:
             return self._no_worker(environ, start_response)
         #
-        # Prepare the environ for RPC transport
+        # Handle health endpoints locally (no worker needed)
+        app_path = environ.get("PATH_INFO", "")
+        for endpoint in ["/healthz/", "/livez/", "/readyz/"]:
+            endpoint_stripped = endpoint.rstrip("/")
+            if app_path.startswith(endpoint) or app_path == endpoint_stripped:
+                start_response("200 OK", [
+                    ("Content-type", "text/plain"),
+                    ("Cache-Control", "no-store"),
+                ])
+                return [b"OK\n"]
+        #
+        # Detect WebSocket upgrade by HTTP_UPGRADE header
+        upgrade = environ.get("HTTP_UPGRADE", "").lower()
+        if upgrade == "websocket":
+            # Create WebSocket from raw socket and bridge to worker
+            return self._handle_websocket_from_sock(environ, start_response)
+        #
+        # Normal HTTP request — forward to worker via RPC
+        return self._handle_http(environ, start_response)
+
+    def _handle_http(self, environ, start_response):
+        """ Forward a normal HTTP request to the worker via ZMQ RPC """
         rpc_environ = self._prepare_environ(environ)
         #
         try:
@@ -264,6 +293,48 @@ class GeventProxyApp:
         #
         start_response(status, headers)
         return [body]
+
+    def _handle_websocket_from_sock(self, environ, start_response):
+        """
+        Accept a WebSocket upgrade request by creating a WebSocket from the
+        raw TCP socket using simple_websocket.Server (available in the container
+        as a dependency of python-socketio).
+        
+        The proxy keeps the WS connection open and bridges events to/from the
+        worker via EventNode.
+        """
+        import simple_websocket  # pylint: disable=E0401,C0415
+        #
+        ws = simple_websocket.Server(environ)
+        sid = self._start_ws_bridge(ws, environ)
+        #
+        start_response("101 Switching Protocols", [
+            ("Upgrade", "websocket"),
+            ("Connection", "upgrade"),
+        ])
+        return []
+
+    def _start_ws_bridge(self, ws_sock, environ):
+        """ Start a WebSocket bridge: common logic for both WS upgrade types """
+        sid = str(uuid.uuid4())
+        #
+        bridge = WebSocketBridge(self, ws_sock, sid, environ)
+        self._ws_bridges[sid] = bridge
+        #
+        # Subscribe for responses from worker for this SID
+        self.event_node.subscribe(f"ws_response_{sid}", bridge._on_worker_response)
+        #
+        # Start the bridge reader (reads WS → emits to EventNode)
+        from gevent.greenlet import Greenlet  # pylint: disable=E0401,C0412,C0415
+        Greenlet(bridge._reader).start()
+        #
+        # Send the initial environ to worker so it can set up the SocketIO socket
+        self.event_node.emit("ws_open", {
+            "sid": sid,
+            "environ": self._prepare_environ(environ),
+        })
+        #
+        return sid
 
     def _prepare_environ(self, wsgi_environ):
         """ Serialize WSGI environ for RPC transport """
@@ -298,83 +369,72 @@ class GeventProxyApp:
         return [b"Proxy not connected to worker\n"]
 
 
-class ProxyRouterWrapper:
+class WebSocketBridge:
     """
-    Wraps the original RouterApp to intercept SocketIO and health endpoints,
-    forwarding all other requests through the proxy.
+    Bridges a single WebSocket connection between proxy and worker.
     
-    Also proxies `.map` and `.hooks` attributes to the original router so that
-    code that modifies the router (e.g. app.py add_socketio_app) still works.
+    Reader greenlet: reads messages from WS → emits to EventNode as "ws_event"
+    Response listener: receives "ws_response_{sid}" from EventNode → writes to WS
+    
+    The worker processes each event through its EngineIO+SocketIO stack
+    and sends responses back via EventNode.
     """
 
-    def __init__(self, original_router, proxy_app):
-        self.original_router = original_router
+    def __init__(self, proxy_app, ws_sock, sid, environ):
         self.proxy_app = proxy_app
-        self.hooks = original_router.hooks
+        self.ws_sock = ws_sock
+        self.sid = sid
+        self.environ = environ
+        self._closed = False
 
-    @property
-    def map(self):
-        """ Forward .map access to the original router """
-        return self.original_router.map
-
-    def __call__(self, environ, start_response):
-        # Run hooks first (splash, etc.)
-        for hook in list(self.hooks):
-            try:
-                hook_app = hook(self, environ, start_response)
-            except Exception:  # pylint: disable=W0703
-                hook_app = None
-            #
-            if hook_app is not None:
-                return hook_app(environ, start_response)
-        #
-        # Route matching: check if this is a SocketIO or health endpoint
-        # that should be handled locally by the proxy
-        app_path = environ.get("PATH_INFO", "")
-        root_path = environ.get("SCRIPT_NAME", "")
-        #
-        # Health endpoints — handle locally in the proxy (no app logic needed)
-        for endpoint in ["/healthz/", "/livez/", "/readyz/"]:
-            if app_path.startswith(endpoint) or app_path == endpoint.rstrip("/"):
-                if endpoint.rstrip("/") in self.original_router.map:
-                    return self.original_router.map[endpoint.rstrip("/")](environ, start_response)
-        #
-        # SocketIO endpoint — forward to worker
-        socketio_route = None
+    def _reader(self):
+        """ Greenlet: read messages from WebSocket and forward to worker """
         try:
-            from tools import context  # pylint: disable=E0401,C0415
-            socketio_route = context.socketio_route
+            while not self._closed:
+                msg = self.ws_sock.receive()
+                if msg is None:
+                    break
+                # Forward the raw EngineIO data to worker
+                self.proxy_app.event_node.emit("ws_event", {
+                    "sid": self.sid,
+                    "data": msg,
+                })
         except Exception:  # pylint: disable=W0703
             pass
-        #
-        if socketio_route:
-            route_item = socketio_route.rstrip("/")
-            if app_path.startswith(socketio_route) or app_path == route_item:
-                return self.proxy_app(environ, start_response)
-        #
-        # All other requests — forward to worker
-        return self.proxy_app(environ, start_response)
+        finally:
+            self._close()
+
+    def _on_worker_response(self, event_name, payload):
+        """ Called when worker sends a response for this SID """
+        if self._closed:
+            return
+        try:
+            data = payload.get("data")
+            self.ws_sock.send(data)
+        except Exception:  # pylint: disable=W0703
+            self._close()
+
+    def _close(self):
+        """ Close the bridge """
+        if self._closed:
+            return
+        self._closed = True
+        # Notify worker that connection is closed
+        self.proxy_app.event_node.emit("ws_close", {
+            "sid": self.sid,
+        })
+        # Unsubscribe from response topic
+        self.proxy_app.event_node.unsubscribe(
+            f"ws_response_{self.sid}", self._on_worker_response
+        )
+        # Remove from registry
+        self.proxy_app._ws_bridges.pop(self.sid, None)
 
 
 def _http_server_pre_start_hook(handler):
-    from tools import context  # pylint: disable=E0401,C0415
-    #
-    try:
-        route = context.socketio_route
-    except Exception:  # pylint: disable=W0702
-        return True
-    #
-    route_item = route.rstrip("/")
-    app_path = handler.environ.get("PATH_INFO", "")
-    #
-    # In proxy mode, return True for all routes so that ALL requests
-    # (including SocketIO) go through the WSGI app and are forwarded
-    # to the worker process. The worker handles WebSocket upgrades.
-    proxy_config = context.settings.get("server", {}).get("proxy", {})
-    if proxy_config.get("mode", False):
-        return True
-    #
-    if app_path.startswith(route) or app_path == route_item:
-        return False
-    #
+    """ In proxy mode, always return True so ALL requests reach the WSGI app.
+    Also store the raw socket in werkzeug.socket so that simple_websocket.Server
+    (used by Engine.IO) can create a WebSocket from it for transport=websocket
+    upgrade requests. """
+    handler.environ['werkzeug.socket'] = handler.socket
     return True

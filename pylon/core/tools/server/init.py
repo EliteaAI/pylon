@@ -80,11 +80,10 @@ def init_context(context):
     #
     if context.web_runtime == "gevent" and context.server_mode == "web":
         if proxy_mode:
-            # Proxy mode: start the gevent proxy server early
+            # Proxy mode: start the gevent proxy server early.
+            # make_proxy_server sets context.root_router = GeventProxyApp directly.
             from .gevent_proxy import make_proxy_server  # pylint: disable=C0415
-            from .splash import boot_splash_hook  # pylint: disable=C0415
             #
-            context.root_router.hooks.append(boot_splash_hook)
             context.http_server = make_proxy_server(context)
             context.http_server.start()
         else:
