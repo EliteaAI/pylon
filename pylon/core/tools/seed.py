@@ -29,12 +29,18 @@ from pylon.core.tools import log
 from pylon.core.tools import env
 from pylon.core.tools import config
 
+from pylon.core.tools.dict import recursive_merge
+
 
 def load_settings(return_data_first=False):
     """ Load settings from seed from env """
-    settings_data = None
     settings_seed = env.get_var("CONFIG_SEED", None)
     #
+    return load_settings_from_seed(settings_seed, return_data_first=return_data_first)
+
+
+def load_settings_from_seed(settings_seed, return_data_first=False):
+    """ Load settings from seed """
     if not settings_seed or ":" not in settings_seed:
         if return_data_first:
             return None, None
@@ -71,3 +77,23 @@ def parse_settings(settings_data):
         return None
     #
     return settings
+
+
+def apply_tunable_settings(context):
+    """ Apply tunable settings """
+    tunable_settings_data = config.tunable_get("pylon_settings", None)
+    if tunable_settings_data is not None:
+        log.info("Loading and parsing tunable settings")
+        tunable_settings = parse_settings(tunable_settings_data)
+        if tunable_settings:
+            context.settings_data = tunable_settings_data
+            tunable_settings_mode = tunable_settings.get("pylon", {}).get(
+                "tunable_settings_mode", "override"
+            )
+            #
+            if tunable_settings_mode == "merge":
+                context.settings = recursive_merge(context.settings, tunable_settings)
+            elif tunable_settings_mode == "update":
+                context.settings.update(tunable_settings)
+            else:
+                context.settings = tunable_settings

@@ -142,7 +142,7 @@ watchdog==6.0.0
 pyparsing==3.2.5
 
 # Centry
-arbiter @ git+https://github.com/EliteaAI/arbiter.git@1.2.16
+arbiter @ git+https://github.com/EliteaAI/arbiter.git@1.2.17
 centry_logging @ git+https://github.com/EliteaAI/centry_logging.git@1.1.2
 #
 pytest==9.1.1
