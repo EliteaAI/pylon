@@ -27,9 +27,9 @@ from pylon.core.tools import env
 from pylon.core.tools import log
 
 
-def enable_basic_logging():
+def enable_basic_logging(force_debug=False):
     """ Init basic logging support """
-    force_debug_logging = env.get_var("DEBUG_LOGGING", "").lower() in ["true", "yes"]
+    force_debug_logging = env.get_var("DEBUG_LOGGING", "").lower() in ["true", "yes"] or force_debug
     #
     if force_debug_logging:
         basic_log_level = logging.DEBUG
@@ -42,9 +42,9 @@ def enable_basic_logging():
     apply_pylon_patches()
 
 
-def reinit_logging(context):
+def reinit_logging(context, force_debug=False):
     """ (Re-)Init logging support """
-    force_debug_logging = env.get_var("DEBUG_LOGGING", "").lower() in ["true", "yes"]
+    force_debug_logging = env.get_var("DEBUG_LOGGING", "").lower() in ["true", "yes"] or force_debug
     #
     if "log" in context.settings:
         # New-style log configuration is present

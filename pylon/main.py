@@ -42,17 +42,6 @@ if CORE_WEB_RUNTIME == "gevent":
     gevent.hub.Hub.NOT_ERROR = tuple(hub_not_errors)
 
 #
-# Disable some of the warnings early
-#
-
-import warnings
-
-warnings.filterwarnings(
-    action="ignore",
-    message="pkg_resources.*"
-)
-
-#
 # Normal imports and code below
 #
 
@@ -62,13 +51,12 @@ import socket
 import signal
 import threading
 import traceback
-import pkg_resources
 
 from pylon.core.tools import log
 from pylon.core.tools import log_support
 from pylon.core.tools import db_support
 from pylon.core.tools import env
-from pylon.core.tools import config
+from pylon.core.tools import package
 from pylon.core.tools import module
 from pylon.core.tools import event
 from pylon.core.tools import seed
@@ -84,7 +72,6 @@ from pylon.core.tools import profiling
 from pylon.core.tools import manager
 from pylon.core.tools import process
 
-from pylon.core.tools.dict import recursive_merge
 from pylon.core.tools.signal import signal_sigterm
 from pylon.core.tools.signal import kill_remaining_processes
 from pylon.core.tools.signal import ZombieReaper
@@ -107,19 +94,8 @@ def main():  # pylint: disable=R0912,R0914,R0915
     context.web_runtime = CORE_WEB_RUNTIME
     context.runtime_init = env.get_var("INIT", "unknown")
     context.debug = env.get_var("DEVELOPMENT_MODE", "").lower() in ["true", "yes"]
-    # Get pylon version + requirements
-    try:
-        pylon_pkg = pkg_resources.require("pylon")[0]
-        context.pylon_requirements = "\n".join(str(req) for req in pylon_pkg.requires())
-        context.pylon_version = pylon_pkg.version
-    except:  # pylint: disable=W0702
-        context.pylon_requirements = ""
-        context.pylon_version = "unknown"
-    # Get arbiter version
-    try:
-        context.arbiter_version = pkg_resources.require("arbiter")[0].version
-    except:  # pylint: disable=W0702
-        context.arbiter_version = "unknown"
+    # Get runtime versions and pylon requrements
+    package.collect_runtime_versions(context)
     # Enable basic logging and say hello
     log_support.enable_basic_logging()
     log.info(
@@ -138,22 +114,7 @@ def main():  # pylint: disable=R0912,R0914,R0915
     toolkit.basic_init(context)
     db_support.basic_init(context)
     # Tunable pylon settings
-    tunable_settings_data = config.tunable_get("pylon_settings", None)
-    if tunable_settings_data is not None:
-        log.info("Loading and parsing tunable settings")
-        tunable_settings = seed.parse_settings(tunable_settings_data)
-        if tunable_settings:
-            context.settings_data = tunable_settings_data
-            tunable_settings_mode = tunable_settings.get("pylon", {}).get(
-                "tunable_settings_mode", "override"
-            )
-            #
-            if tunable_settings_mode == "merge":
-                context.settings = recursive_merge(context.settings, tunable_settings)
-            elif tunable_settings_mode == "update":
-                context.settings.update(tunable_settings)
-            else:
-                context.settings = tunable_settings
+    seed.apply_tunable_settings(context)
     # Allow to override debug from config
     if "debug" in context.settings.get("server", {}):
         context.debug = context.settings.get("server").get("debug")
