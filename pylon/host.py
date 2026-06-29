@@ -219,7 +219,7 @@ def main():
     #
     # Transitional: SIO
     #
-    context.sio = None
+    context.sio = SIOHostProxy(context)
     #
     # Phase: router
     #
