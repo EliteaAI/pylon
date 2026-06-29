@@ -32,8 +32,6 @@
 #
 
 import gevent.monkey
-
-from build.lib.pylon.core.tools import context  # pylint: disable=E0401
 gevent.monkey.patch_all()
 #
 import psycogreen.gevent  # pylint: disable=E0401

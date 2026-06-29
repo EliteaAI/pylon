@@ -333,6 +333,23 @@ def wsgi_request_start(output_stream_id, stream_node, app):
     return input_stream_id
 
 
+class SIOHostProxy:
+    """ Remote SIO proxy """
+
+    def __init__(self, context):
+        self.__context = context
+
+    def emit(self, *args, **kwargs):
+        self.__context.ipc_event_node.emit(
+            "sio_invoke",
+            {
+                "method": "emit",
+                "args": args,
+                "kwargs": kwargs,
+            }
+        )
+
+
 class AppRequestThread(threading.Thread):
     def __init__(self, app, stream_node, input_stream_id, output_stream_id):
         super().__init__(daemon=True)
