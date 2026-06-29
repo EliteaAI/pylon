@@ -352,6 +352,29 @@ class SIOHostProxy:
             }
         )
 
+    def on(self, event, handler=None, namespace=None):
+        namespace = namespace or '/'
+        #
+        def _on(handler):
+            return handler
+        #
+        if handler is None:
+            return _on
+        #
+        _on(handler)
+
+    def remove_handler(self, event, handler, namespace=None):
+        namespace = namespace or "/"
+
+    def pylon_trigger_event(self, event, namespace, *args):
+        pass
+
+    def pylon_add_any_handler(self, handler):
+        pass
+
+    def pylon_remove_any_handler(self, handler):
+        pass
+
 
 class AppRequestThread(threading.Thread):
     def __init__(self, app, stream_node, input_stream_id, output_stream_id):
