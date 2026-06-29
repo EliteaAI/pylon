@@ -261,7 +261,7 @@ def main():
             functools.partial(
                 wsgi_request_start,
                 stream_node=context.ipc_stream_node,
-                app=context.app,
+                app=context.root_router,
             ),
             "wsgi_request_start",
         )
