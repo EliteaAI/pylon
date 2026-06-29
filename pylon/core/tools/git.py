@@ -197,7 +197,7 @@ def clone(  # pylint: disable=R0913,R0912,R0914,R0915
         log.info("Checking out branch tree %s", branch)
         repository[b"refs/heads/" + branch_b] = repository[b"refs/remotes/origin/" + branch_b]
         repository.refs.set_symbolic_ref(b"HEAD", b"refs/heads/" + branch_b)
-        repository.reset_index(repository[b"HEAD"].tree)
+        repository.index.reset_index(repository[b"HEAD"].tree)
         #
         branch_to_track = branch
     elif commit_tree is not None:
@@ -216,7 +216,7 @@ def clone(  # pylint: disable=R0913,R0912,R0914,R0915
         elif target_type == "tag":
             repository.refs.set_symbolic_ref(b"HEAD", b"refs/tags/" + branch_b)
         #
-        repository.reset_index(commit_tree.tree)
+        repository.index.reset_index(commit_tree.tree)
     elif head_tree is not None:
         try:
             default_branch_name = repository.refs.follow(b"HEAD")[0][1]
@@ -234,7 +234,7 @@ def clone(  # pylint: disable=R0913,R0912,R0914,R0915
             log.warning("Branch %s was not found. Trying to check out default branch", branch)
         #
         try:
-            repository.reset_index(repository[b"HEAD"].tree)
+            repository.index.reset_index(repository[b"HEAD"].tree)
         except:  # pylint: disable=W0702
             log.exception("Failed to checkout default branch")
     else:
