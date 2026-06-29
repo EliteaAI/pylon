@@ -36,18 +36,21 @@ import arbiter  # pylint: disable=E0401
 
 from pylon.core.tools import log
 from pylon.core.tools import log_support
+from pylon.core.tools import exposure
 from pylon.core.tools import package
 from pylon.core.tools import env
 from pylon.core.tools import seed
 from pylon.core.tools import db_support
 from pylon.core.tools import process
 from pylon.core.tools.context import Context
+from pylon.core.tools.signal import kill_remaining_processes
 from pylon.framework import toolkit
 
 
 def main():
     """ Entry point """
     context = Context()
+    context.role = "init"
     context.stop_event = threading.Event()
     #
     signal.signal(signal.SIGINT, lambda signum, frame: context.stop_event.set())
@@ -79,6 +82,12 @@ def main():
     seed.apply_tunable_settings(context)
     db_support.basic_deinit(context)
     #
+    context.runtime_init = env.get_var("INIT", "unknown")
+    context.reloader_used = False
+    context.before_reloader = False
+    #
+    exposure.expose_zmq(context)
+    #
     context.ipc_zmq_server = arbiter.ZeroMQServerNode(
         bind_pub="ipc:///tmp/ipc_pub.sock",
         bind_pull="ipc:///tmp/ipc_pull.sock",
@@ -106,9 +115,15 @@ def main():
     else:
         log.info("Stopping on event")
     finally:
-        context.host_subpylon.start()
-        context.gate_subpylon.start()
+        context.host_subpylon.stop()
+        context.gate_subpylon.stop()
         context.ipc_zmq_server.stop()
+        #
+        exposure.unexpose_zmq(context)
+    #
+    if context.settings.get("system", {}).get("kill_remaining_processes", True) and \
+            context.runtime_init in ["pylon", "dumb-init"]:
+        kill_remaining_processes(context)
 
 
 if __name__ == "__main__":

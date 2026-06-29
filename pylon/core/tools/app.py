@@ -66,7 +66,7 @@ class AppManager:  # pylint: disable=R0903,R0902
         """ Init A/WSGI app hierarchy """
         log.info("Initializing hierarchy")
         # SocketIO
-        self.add_socketio_app()
+        # self.add_socketio_app()
         # App router
         self.add_app_router()
         # Session interface
