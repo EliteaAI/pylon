@@ -28,6 +28,8 @@
 
 import os
 import sys
+import uuid
+import socket
 import argparse
 import signal
 import functools
@@ -36,10 +38,29 @@ import traceback
 
 import arbiter  # pylint: disable=E0401
 
-from pylon.core.tools import env
 from pylon.core.tools import log
 from pylon.core.tools import log_support
-from pylon.core.tools.server import wsgi
+from pylon.core.tools import db_support
+from pylon.core.tools import env
+from pylon.core.tools import package
+from pylon.core.tools import module
+from pylon.core.tools import event
+from pylon.core.tools import seed
+from pylon.core.tools import git
+from pylon.core.tools import app
+from pylon.core.tools import rpc
+from pylon.core.tools import ssl
+from pylon.core.tools import slot
+from pylon.core.tools import server
+from pylon.core.tools import external_routing
+from pylon.core.tools import exposure
+from pylon.core.tools import profiling
+from pylon.core.tools import manager
+from pylon.core.tools import process
+from pylon.core.tools.context import Context
+from pylon.core.tools.signal import ZombieReaper
+from pylon.framework import toolkit
+from pylon.framework import router
 
 
 def dump_threads_handler(signum, frame):
@@ -61,6 +82,14 @@ def dump_threads_handler(signum, frame):
 
 def main():
     """ Entry point """
+    context = Context()
+    context.role = "host"
+    context.stop_event = threading.Event()
+    #
+    signal.signal(signal.SIGINT, lambda signum, frame: context.stop_event.set())
+    signal.signal(signal.SIGTERM, lambda signum, frame: context.stop_event.set())
+    signal.signal(signal.SIGUSR1, dump_threads_handler)
+    #
     parser = argparse.ArgumentParser(description="Pylon host")
     parser.add_argument("--config-seed", type=str, default=env.get_var("CONFIG_SEED", None), help="Configuration seed")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -69,69 +98,234 @@ def main():
     args = parser.parse_args()
     #
     log_support.enable_basic_logging(force_debug=args.debug)
+    package.collect_runtime_versions(context)
+    toolkit.basic_init(context)
     #
-    stop_event = threading.Event()
+    log.info(
+        "Starting plugin-based core host (python: %s, pylon: %s, arbiter: %s)",
+        sys.version,
+        context.pylon_version,
+        context.arbiter_version,
+    )
     #
-    signal.signal(signal.SIGUSR1, dump_threads_handler)
-    signal.signal(signal.SIGINT, lambda signum, frame: stop_event.set())
-    signal.signal(signal.SIGTERM, lambda signum, frame: stop_event.set())
-    #
-    event_node = arbiter.ZeroMQEventNode(
+    context.ipc_event_node = arbiter.ZeroMQEventNode(
         connect_sub=args.ipc_socket_pub,
         connect_push=args.ipc_socket_pull,
         topic="pylon_ipc",
         callback_workers=None,
     )
-    event_node.start()
+    context.ipc_event_node.start()
     #
-    service_node = arbiter.ServiceNode(event_node, default_timeout=15)
-    service_node.start()
+    context.ipc_service_node = arbiter.ServiceNode(context.ipc_event_node, default_timeout=15)
+    context.ipc_service_node.start()
     #
-    stream_node = arbiter.StreamNode(event_node, id_prefix="host:")
-    stream_node.start()
+    context.ipc_stream_node = arbiter.StreamNode(context.ipc_event_node, id_prefix="host:")
+    context.ipc_stream_node.start()
     #
-    app = wsgi.RouterApp(
-        default=wsgi.ok_app,
-        # default=wsgi.debug_app,
-    )
-    app.map["/"] = demo_app
+    # Main (adapted)
     #
-    service_node.register(functools.partial(wsgi_request_start, stream_node=stream_node, app=app), "wsgi_request_start")
+    # Save env-provided settings
+    context.web_runtime = "host"
+    context.runtime_init = env.get_var("INIT", "unknown")
+    context.debug = env.get_var("DEVELOPMENT_MODE", "").lower() in ["true", "yes"] or args.debug
+    # Load settings from seed
+    log.info("Loading and parsing settings")
+    context.settings_data, context.settings = seed.load_settings_from_seed(args.config_seed, return_data_first=True)
+    if not context.settings:
+        log.error("Settings are empty or invalid. Exiting")
+        os._exit(1)  # pylint: disable=W0212
+    # Basic init
+    db_support.basic_init(context)
+    # Tunable pylon settings
+    seed.apply_tunable_settings(context)
+    # Allow to override debug from config
+    if "debug" in context.settings.get("server", {}):
+        context.debug = context.settings.get("server").get("debug")
+    # Save reloader status
+    context.reloader_used = False
+    context.before_reloader = False
+    # Save global node name
+    context.node_name = context.settings.get("server", {}).get("name", socket.gethostname())
+    # Generate pylon ID
+    context.id = f'{context.node_name}_{str(uuid.uuid4())}'
+    # Set environment overrides (e.g. to add env var with data from vault)
+    log.info("Setting environment overrides")
+    for key, value in context.settings.get("environment", {}).items():
+        os.environ[key] = value
+    # Transitional: add server-related data, make root router with hook and start (if gevent)
+    server.init_context(context)
+    context.server_mode = "block"
+    # Reinit logging with full config
+    log_support.reinit_logging(context)
+    # Log pylon ID
+    log.info("Pylon ID: %s", context.id)
+    # Set process title
+    import setproctitle  # pylint: disable=C0415,E0401
+    setproctitle.setproctitle(f'pylon {context.id}')
+    # Initialize local data
+    context.local = threading.local()
+    # Enable zombie reaping
+    if context.settings.get("system", {}).get("zombie_reaping", {}).get("enabled", False):
+        context.zombie_reaper = ZombieReaper(context)
+        context.zombie_reaper.start()
+    # Disable core dump file generation
+    if context.settings.get("system", {}).get("disable_core_dumps", True):
+        import resource  # pylint: disable=C0415,E0401
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    # Prepare SSL custom cert bundle
+    ssl.init(context)
+    # Apply patches needed for pure-python git and providers
+    git.apply_patches()
+    # Save profiling settings
+    context.profiling = context.settings.get("system", {}).get("profiling", {}).copy()
     #
-    event_node.subscribe("sio_event", functools.partial(on_sio_event, node=event_node))
-    event_node.subscribe("sio_ack", functools.partial(on_sio_event, node=event_node))
+    # Phase: core entity instances
     #
+    # Make AppManager instance
+    log.info("Creating AppManager instance")
+    context.app_manager = app.AppManager(context)
+    # Make ModuleManager instance
+    log.info("Creating ModuleManager instance")
+    context.module_manager = module.ModuleManager(context)
+    #
+    # Phase: framework
+    #
+    # Init framework toolkit
+    toolkit.init(context)
+    # Initialize DB support
+    db_support.init(context)
+    #
+    # Phase: entity instances
+    #
+    # Make EventManager instance
+    log.info("Creating EventManager instance")
+    context.event_manager = event.EventManager(context)
+    # Make RpcManager instance
+    log.info("Creating RpcManager instance")
+    context.rpc_manager = rpc.RpcManager(context)
+    # Make SlotManager instance
+    log.info("Creating SlotManager instance")
+    context.slot_manager = slot.SlotManager(context)
+    #
+    # Phase: pylon manager
+    #
+    log.info("Creating Manager instance")
+    context.manager = manager.Manager(context)
+    #
+    # Phase: A/WSGI apps
+    #
+    # Init app hierarchy
+    context.app_manager.init_hierarchy()
+    #
+    # Transitional: SIO
+    #
+    context.sio = None
+    #
+    # Phase: router
+    #
+    # Init framework router
+    router.init(context)
+    #
+    # Phase: modules
+    #
+    # Enable profiling: init
+    profiling.profiling_start(context, "init")
+    # Modules can clear flag in init and set it in pylon_modules_initialized handler after some async work to delay server start until they are ready
+    context.can_exit_init_stage = threading.Event()
+    context.can_exit_init_stage.set()
+    # Load and initialize modules
+    context.module_manager.init_modules()
+    context.event_manager.fire_event("pylon_modules_initialized", context.id)
+    # Wait for async module initialization if needed
+    context.can_exit_init_stage.wait()
+    # Print profile stats: init
+    profiling.profiling_stop(context, "init")
+    #
+    # Phase: exposure
+    #
+    # Register external route
+    external_routing.register(context)
+    # Expose pylon
+    exposure.expose(context)
+    #
+    # Phase: operational
+    #
+    # Enable profiling: run
+    profiling.profiling_start(context, "run")
+    # Run A/WSGI server
     try:
-        stop_event.wait()
-    except:
-        log.exception("Stopping on exception")
-    else:
-        log.info("Stopping on event")
+        context.ipc_service_node.register(
+            functools.partial(
+                wsgi_request_start,
+                stream_node=context.ipc_stream_node,
+                app=context.app,
+            ),
+            "wsgi_request_start",
+        )
+        #
+        context.ipc_event_node.subscribe(
+            "sio_event",
+            functools.partial(
+                on_sio_event,
+                context=context,
+            )
+        )
+        context.ipc_event_node.subscribe(
+            "sio_ack",
+            functools.partial(
+                on_sio_event,
+                context=context,
+            )
+        )
+        #
+        server.run_server(context)
+    except:  # pylint: disable=W0702
+        log.debug("Stopping on exception:\n%s", traceback.format_exc())
     finally:
-        stream_node.stop()
-        service_node.stop()
-        event_node.stop()
+        # TODO: show splash and delay server stop
+        log.info("A/WSGI server stopped")
+        # Print profile stats: run
+        profiling.profiling_stop(context, "run")
+        # Set stop event
+        context.stop_event.set()
+        # Unexpose pylon
+        exposure.unexpose(context)
+        # Unregister external route
+        external_routing.unregister(context)
+        # Enable profiling: deinit
+        profiling.profiling_start(context, "deinit")
+        # De-init modules
+        context.module_manager.deinit_modules()
+        # Print profile stats: deinit
+        profiling.profiling_stop(context, "deinit")
+        # Leave mesh
+        # Stop subpylons
+        process.stop_subpylons(context)
+        # De-initialize DB support
+        db_support.deinit(context)
+    #
+    # Phase: terminate
+    #
+    # Flush logs here
+    log.info("Exiting")
+    log.flush()
+    #
+    context.ipc_stream_node.stop()
+    context.ipc_service_node.stop()
+    context.ipc_event_node.stop()
+    # Exit
+    log.shutdown()
 
 
-def on_sio_event(event, payload, node):
+def on_sio_event(event, payload, context):
     """ Handle events from the gate """
     log.info("EVENT: event=%s, payload=%s", event, payload)
-    #
-    if payload["event"] == "client-message":
-        node.emit(
-            "sio_invoke",
-            {
-                "method": "emit",
-                "args": ["server-message", f"Received: {payload}"],
-                "kwargs": {
-                    "to": payload["args"][0],
-                },
-            }
-        )
 
 
 def wsgi_request_start(output_stream_id, stream_node, app):
     input_stream_id = stream_node.add_stream()
+    #
+    # Idea: using threadpool if needed
     #
     request_thread = AppRequestThread(app, stream_node, input_stream_id, output_stream_id)
     request_thread.start()
@@ -234,73 +428,6 @@ class AppObjectProxy:  # pylint: disable=R0903
             self.__partials[name] = functools.partial(self.__request, name)
         #
         return self.__partials[name]
-
-
-DEMO_HTML = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Socket.IO Boilerplate</title>
-    <style>
-        body { font-family: sans-serif; padding: 20px; }
-        #messages { border: 1px solid #ccc; height: 200px; overflow-y: auto; padding: 10px; margin-bottom: 10px; }
-    </style>
-</head>
-<body>
-
-    <h1>Socket.IO Live Connection</h1>
-    <div id="messages"></div>
-    <button id="sendBtn">Send Message to Server</button>
-
-    <!-- Load the Socket.IO client library -->
-    <script src="https://cdn.socket.io/4.8.3/socket.io.min.js" integrity="sha384-kzavj5fiMwLKzzD1f8S7TeoVIEi7uKHvbTA3ueZkrzYq75pNQUiUi6Dy98Q3fxb0" crossorigin="anonymous"></script>
-    <script>
-        // Connect to the Socket.IO server automatically
-        const socket = io();
-
-        const messagesDiv = document.getElementById('messages');
-        const sendBtn = document.getElementById('sendBtn');
-
-        // Confirm connection status
-        socket.on('connect', () => {
-            appendMessage(`Connected with ID: ${socket.id}`);
-        });
-
-        // Listen for messages emitted by the server
-        socket.on('server-message', (data) => {
-            appendMessage(`Server says: ${data}`);
-        });
-
-        // Emit an event when clicking the button
-        sendBtn.addEventListener('click', () => {
-            const payload = `Hello at ${new Date().toLocaleTimeString()}`;
-            socket.emit('client-message', payload);
-        });
-
-        // Helper to display text in the DOM
-        function appendMessage(text) {
-            const p = document.createElement('p');
-            p.textContent = text;
-            messagesDiv.appendChild(p);
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
-        }
-    </script>
-</body>
-</html>
-"""
-
-
-def demo_app(environ, start_response):
-    """ Serve demo HTML page """
-    _ = environ
-    #
-    start_response("200 OK", [
-        ("Content-type", "text/html; charset=utf-8"),
-    ])
-    #
-    return [DEMO_HTML.encode("utf-8")]
 
 
 if __name__ == "__main__":

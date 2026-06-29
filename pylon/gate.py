@@ -31,7 +31,9 @@
 # Before all other imports and code: patch standard library and other libraries to use async I/O
 #
 
-import gevent.monkey  # pylint: disable=E0401
+import gevent.monkey
+
+from build.lib.pylon.core.tools import context  # pylint: disable=E0401
 gevent.monkey.patch_all()
 #
 import psycogreen.gevent  # pylint: disable=E0401
@@ -63,13 +65,22 @@ from geventwebsocket.handler import WebSocketHandler  # pylint: disable=E0401,C0
 from pylon.core import constants
 from pylon.core.tools import log
 from pylon.core.tools import log_support
+from pylon.core.tools import package
 from pylon.core.tools import exposure
 from pylon.core.tools.context import Context
 from pylon.core.tools.server import wsgi
+from pylon.framework import toolkit
 
 
 def main():
     """ Entry point """
+    context = Context()
+    context.role = "gate"
+    context.stop_event = gevent.event.Event()
+    #
+    signal.signal(signal.SIGINT, lambda signum, frame: context.stop_event.set())
+    signal.signal(signal.SIGTERM, lambda signum, frame: context.stop_event.set())
+    #
     parser = argparse.ArgumentParser(description="Pylon gate")
     # parser.add_argument("--config", type=str, default="/etc/pylon/config.yaml", help="Path to the configuration file")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -82,79 +93,74 @@ def main():
     args = parser.parse_args()
     #
     log_support.enable_basic_logging(force_debug=args.debug)
+    package.collect_runtime_versions(context)
+    toolkit.basic_init(context)
     #
-    context = Context()
+    log.info(
+        "Starting plugin-based core gate (python: %s, pylon: %s, arbiter: %s)",
+        sys.version,
+        context.pylon_version,
+        context.arbiter_version,
+    )
+    #
     context.web_runtime = "gevent"  # Needed for downstream components (that are using dynamic runtime detection)
     #
-    if "tools" not in sys.modules:
-        sys.modules["tools"] = types.ModuleType("tools")
-        sys.modules["tools"].__path__ = []
-    #
-    setattr(sys.modules["tools"], "context", context)
-    #
-    context.gate = Context()
-    #
-    context.gate.stop_event = gevent.event.Event()
-    #
-    signal.signal(signal.SIGINT, lambda signum, frame: context.gate.stop_event.set())
-    signal.signal(signal.SIGTERM, lambda signum, frame: context.gate.stop_event.set())
-    #
-    context.gate.event_node = arbiter.ZeroMQEventNode(
+    context.event_node = arbiter.ZeroMQEventNode(
         connect_sub=args.ipc_socket_pub,
         connect_push=args.ipc_socket_pull,
         topic="pylon_ipc",
         callback_workers=None,
     )
-    context.gate.event_node.start()
+    context.event_node.start()
     #
-    context.gate.service_node = arbiter.ServiceNode(context.gate.event_node, default_timeout=15)
-    context.gate.service_node.start()
+    context.service_node = arbiter.ServiceNode(context.event_node, default_timeout=15)
+    context.service_node.start()
     #
-    context.gate.stream_node = arbiter.StreamNode(context.gate.event_node, id_prefix="gate:")
-    context.gate.stream_node.start()
+    context.stream_node = arbiter.StreamNode(context.event_node, id_prefix="gate:")
+    context.stream_node.start()
     #
-    context.gate.sio = SIOGateServer(context, async_mode="gevent")
+    context.sio = SIOGateServer(context, async_mode="gevent")
     #
-    context.gate.event_node.subscribe("sio_invoke", context.gate.sio.pylon_event_handler)
+    context.event_node.subscribe("sio_invoke", context.sio.pylon_event_handler)
     #
-    context.gate.app = wsgi.RouterApp()
-    context.gate.app.map["/"] = functools.partial(
+    context.app = wsgi.RouterApp()
+    context.app.map["/"] = functools.partial(
         wsgi_app,
-        stream_node=context.gate.stream_node,
-        service_node=context.gate.service_node,
+        stream_node=context.stream_node,
+        service_node=context.service_node,
     )
-    context.gate.app.map["/socket.io/"] = socketio.WSGIApp(
-        socketio_app=context.gate.sio,
+    context.app.map["/socket.io/"] = socketio.WSGIApp(
+        socketio_app=context.sio,
         socketio_path="/",
     )
     #
-    context.gate.http_server = WSGIServer(
+    context.http_server = WSGIServer(
         (
             args.host,
             args.http_port
         ),
-        context.gate.app,
+        context.app,
         handler_class=WebSocketHandler,
     )
     #
-    setattr(context.gate.http_server, "pre_start_hook", websocket_upgrade_hook)
+    setattr(context.http_server, "pre_start_hook", websocket_upgrade_hook)
     #
-    context.gate.http_server.start()
+    context.http_server.start()
     #
     try:
-        context.gate.stop_event.wait()
+        context.stop_event.wait()
     #
     except:
         log.exception("Stopping on exception")
     else:
         log.info("Stopping on event")
     finally:
-        context.gate.sio.shutdown()
-        context.gate.http_server.stop()
+        context.sio.shutdown()
+        context.http_server.stop()
         #
-        context.gate.stream_node.stop()
-        context.gate.service_node.stop()
-        context.gate.event_node.stop()
+        context.stream_node.stop()
+        context.service_node.stop()
+        context.event_node.stop()
 
 
 def wsgi_app(environ, start_response, stream_node, service_node):
@@ -256,7 +262,7 @@ class SIOGateServer(socketio.Server):
         #
         log.debug("ACK: eio_sid=%s, namespace=%s, sid=%s, id=%s, data=%s", eio_sid, namespace, sid, id, data)
         #
-        self.__context.gate.event_node.emit(
+        self.__context.event_node.emit(
             "sio_ack",
             {
                 "eio_sid": eio_sid,
@@ -283,7 +289,7 @@ class SIOGateServer(socketio.Server):
             args[1] = exposure.prepare_rpc_environ(args[1])
             args = tuple(args)
         #
-        self.__context.gate.event_node.emit(
+        self.__context.event_node.emit(
             "sio_event",
             {
                 "event": event,
