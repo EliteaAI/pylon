@@ -246,6 +246,9 @@ def main():
     # Register external route
     external_routing.register(context)
     # Expose pylon
+    context.exposure = Context()
+    context.exposure.config = context.settings.get("exposure", {})
+    #
     exposure.expose(context)
     #
     # Phase: operational
