@@ -13,6 +13,7 @@ RUN set -x \
       supervisor \
       postgresql-client \
       geoip-database \
+      libsndfile1 \
       libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 \
       libcairo2 libcups2 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0 \
       libnspr4 libnss3 libpango-1.0-0 \
