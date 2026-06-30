@@ -414,7 +414,7 @@ def prepare_rpc_environ(wsgi_environ):
         result["wsgi.input"] = b""
     #
     for key, value in result.items():
-        if isinstance(value, (bytes, str, int, bool)):
+        if type(value) in [int, bool, str, bytes, tuple]:
             continue
         #
         log.warning("Dropping non-serializable WSGI environ key: %s (%s)", key, type(value))
