@@ -413,7 +413,7 @@ def prepare_rpc_environ(wsgi_environ):
     except:  # pylint: disable=W0702
         result["wsgi.input"] = b""
     #
-    for key, value in result.items():
+    for key, value in list(result.items()):
         if type(value) in [int, bool, str, bytes, tuple]:
             continue
         #
