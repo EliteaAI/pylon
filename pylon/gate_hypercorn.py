@@ -46,6 +46,7 @@ import asyncio
 
 import arbiter  # pylint: disable=E0401
 import socketio  # pylint: disable=E0401
+import asgiref.wsgi  # pylint: disable=E0401
 from hypercorn.asyncio import serve  # pylint: disable=E0401
 from hypercorn.config import Config  # pylint: disable=E0401
 from hypercorn.app_wrappers import WSGIWrapper  # pylint: disable=E0401
@@ -128,7 +129,7 @@ async def async_main():
         stream_node=context.stream_node,
         service_node=context.service_node,
     )
-    wrapped_wsgi = WSGIWrapper(wsgi_bridge, max_body_size=16 * 1024 * 1024)
+    wrapped_wsgi = asgiref.wsgi.WsgiToAsgi(wsgi_bridge)
     #
     # 2. Socket.IO ASGI app
     sio_asgi_app = socketio.ASGIApp(
