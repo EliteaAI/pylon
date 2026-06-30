@@ -398,6 +398,7 @@ def prepare_rpc_environ(wsgi_environ):
         "werkzeug.socket",
         "werkzeug.request",
         "waitress.client_disconnected",
+        "asgi.scope",
         "asgi.send",
         "asgi.receive",
         "wsgi.errors",
