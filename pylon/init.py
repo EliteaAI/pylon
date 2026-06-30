@@ -98,7 +98,7 @@ def main():
     #
     context.gate_subpylon = process.SubpylonInstance(context, {
         "name": "gate",
-        "command": [sys.executable, "-m", "pylon.gate"],
+        "command": [sys.executable, "-m", "pylon.gate_hypercorn"],
     })
     context.gate_subpylon.start()
     #
