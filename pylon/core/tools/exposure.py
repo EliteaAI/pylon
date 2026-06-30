@@ -413,6 +413,14 @@ def prepare_rpc_environ(wsgi_environ):
     except:  # pylint: disable=W0702
         result["wsgi.input"] = b""
     #
+    for key, value in result.items():
+        if isinstance(value, (bytes, str, int, bool)):
+            continue
+        #
+        log.warning("Dropping non-serializable WSGI environ key: %s (%s)", key, type(value))
+        #
+        result.pop(key, None)
+    #
     return result
 
 
