@@ -26,6 +26,7 @@ import io
 import sys
 import time
 import queue
+import asyncio
 import threading
 import http.server
 
@@ -409,7 +410,10 @@ def prepare_rpc_environ(wsgi_environ):
         result.pop(key, None)
     #
     try:
-        result["wsgi.input"] = result["wsgi.input"].read()
+        if asyncio.iscoroutinefunction(result["wsgi.input"].read):
+            result["wsgi.input"] = asyncio.run(result["wsgi.input"].read())
+        else:
+            result["wsgi.input"] = result["wsgi.input"].read()
     except:  # pylint: disable=W0702
         result["wsgi.input"] = b""
     #
