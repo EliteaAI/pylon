@@ -357,6 +357,11 @@ class SIOHostProxy:
                 "leave_room",
         ]:
             setattr(self, invoke_service, functools.partial(self.pylon_gate_invoke_service, invoke_service))
+        #
+        for invoke_object in [
+                "manager",
+        ]:
+            setattr(self, invoke_object, SIOObjectProxy(context, invoke_object))
 
     def on(self, event, handler=None, namespace=None):
         namespace = namespace or '/'
@@ -469,6 +474,18 @@ class SIOHostProxy:
     def pylon_gate_invoke_service(self, method, *args, **kwargs):
         log.info("Invoking SIO service method '%s' with args=%s, kwargs=%s", method, args, kwargs)
         #
+        if method == "emit":
+            event = args[0] if len(args) > 0 else kwargs.get("event")
+            if event is not None and not isinstance(event, str):
+                log.warning("SIO emit event name is not a string: %s (%s)", event, type(event))
+                #
+                event = str(event)
+                #
+                if len(args) > 0:
+                    args = (event, *args[1:])
+                else:
+                    kwargs["event"] = event
+        #
         return self.__context.ipc_service_node.request(
             "sio_invoke",
             kwargs={
@@ -477,6 +494,26 @@ class SIOHostProxy:
                 "kwargs": kwargs,
             }
         )
+
+
+class SIOObjectProxy:  # pylint: disable=R0903
+    """ SIO object proxy """
+
+    def __init__(  # pylint: disable=R0913
+            self, context, obj_name,
+    ):
+        self.__context = context
+        self.__obj_name = obj_name
+        self.__partials = {}
+
+    def __getattr__(self, name):
+        if name not in self.__partials:
+            self.__partials[name] = functools.partial(
+                self.__context.sio.pylon_gate_invoke_service,
+                f"{self.__obj_name}.{name}",
+            )
+        #
+        return self.__partials[name]
 
 
 class AppRequestThread(threading.Thread):

@@ -301,7 +301,17 @@ class SIOGateServer(socketio.Server):
     def pylon_service_handler(self, method, args, kwargs):
         """ Handle calls from the host """
         with self.__lock:
-            method_to_call = getattr(self, method)
+            if "." in method:
+                parts = method.split(".")
+                target = self
+                #
+                for part in parts[:-1]:
+                    target = getattr(target, part)
+                #
+                method_to_call = getattr(target, parts[-1])
+            else:
+                method_to_call = getattr(self, method)
+            #
             return method_to_call(*args, **kwargs)
 
 
