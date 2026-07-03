@@ -96,11 +96,14 @@ def main():
     #
     context.server_mode = "init"
     #
-    context.gate_subpylon = process.SubpylonInstance(context, {
-        "name": "gate",
-        "command": [sys.executable, "-m", "pylon.gate.gevent"],
-    })
-    context.gate_subpylon.start()
+    if context.settings.get("server", {}).get("mode", "web") == "web":
+        context.gate_subpylon = process.SubpylonInstance(context, {
+            "name": "gate",
+            "command": [sys.executable, "-m", "pylon.gate.gevent"],
+        })
+        context.gate_subpylon.start()
+    else:
+        context.gate_subpylon = None
     #
     context.host_subpylon = process.SubpylonInstance(context, {
         "name": "host",
@@ -116,7 +119,10 @@ def main():
         log.info("Stopping on event")
     finally:
         context.host_subpylon.stop()
-        context.gate_subpylon.stop()
+        #
+        if context.gate_subpylon is not None:
+            context.gate_subpylon.stop()
+        #
         context.ipc_zmq_server.stop()
         #
         exposure.unexpose_zmq(context)
