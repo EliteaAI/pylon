@@ -98,13 +98,13 @@ def main():
     #
     context.gate_subpylon = process.SubpylonInstance(context, {
         "name": "gate",
-        "command": [sys.executable, "-m", "pylon.gate_hypercorn"],
+        "command": [sys.executable, "-m", "pylon.gate.gevent"],
     })
     context.gate_subpylon.start()
     #
     context.host_subpylon = process.SubpylonInstance(context, {
         "name": "host",
-        "command": [sys.executable, "-m", "pylon.host"],
+        "command": [sys.executable, "-m", "pylon.host.threading"],
     })
     context.host_subpylon.start()
     #
