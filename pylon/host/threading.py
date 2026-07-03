@@ -472,19 +472,19 @@ class SIOHostProxy:
         )
 
     def pylon_gate_invoke_service(self, method, *args, **kwargs):
-        log.info("Invoking SIO service method '%s' with args=%s, kwargs=%s", method, args, kwargs)
+        log.info("[Pre] Invoking SIO service method '%s' with args=%s, kwargs=%s", method, args, kwargs)
         #
         if method == "emit":
             event = args[0] if len(args) > 0 else kwargs.get("event")
-            if event is not None and not isinstance(event, str):
-                log.warning("SIO emit event name is not a string: %s (%s)", event, type(event))
-                #
+            if event is not None:
                 event = str(event)
                 #
                 if len(args) > 0:
                     args = (event, *args[1:])
                 else:
                     kwargs["event"] = event
+        #
+        log.info("[Post] Invoking SIO service method '%s' with args=%s, kwargs=%s", method, args, kwargs)
         #
         return self.__context.ipc_service_node.request(
             "sio_invoke",

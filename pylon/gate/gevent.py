@@ -312,7 +312,11 @@ class SIOGateServer(socketio.Server):
             else:
                 method_to_call = getattr(self, method)
             #
-            return method_to_call(*args, **kwargs)
+            result = method_to_call(*args, **kwargs)
+            if isinstance(result, types.GeneratorType):
+                log.warning("Generator result from %s.%s, converting to list", self.__class__.__name__, method)
+                result = list(result)
+            return result
 
 
 if __name__ == "__main__":
