@@ -120,6 +120,7 @@ def main():
     context.sio = SIOGateServer(context, async_mode="gevent")
     #
     context.event_node.subscribe("sio_invoke", context.sio.pylon_event_handler)
+    context.service_node.register(context.sio.pylon_service_handler, "sio_invoke")
     #
     context.app = wsgi.RouterApp()
     context.app.map["/"] = functools.partial(
@@ -255,33 +256,23 @@ class SIOGateServer(socketio.Server):
         super().__init__(*args, **kwargs)
  
     def _handle_ack(self, eio_sid, namespace, id, data):
-        namespace = namespace or "/"
-        sid = self.manager.sid_from_eio_sid(eio_sid, namespace)
+        pass
         #
-        log.debug("ACK: eio_sid=%s, namespace=%s, sid=%s, id=%s, data=%s", eio_sid, namespace, sid, id, data)
+        # namespace = namespace or "/"
+        # sid = self.manager.sid_from_eio_sid(eio_sid, namespace)
         #
-        self.__context.event_node.emit(
-            "sio_ack",
-            {
-                "eio_sid": eio_sid,
-                "namespace": namespace,
-                "sid": sid,
-                "id": id,
-                "data": data,
-            },
-        )
+        # self.__context.event_node.emit(
+        #     "sio_ack",
+        #     {
+        #         "eio_sid": eio_sid,
+        #         "namespace": namespace,
+        #         "sid": sid,
+        #         "id": id,
+        #         "data": data,
+        #     },
+        # )
 
     def _trigger_event(self, event, namespace, *args):
-        log.debug("EVENT: event=%s, namespace=%s, args=%s", event, namespace, args)
-        #
-        handler, args = self._get_event_handler(event, namespace, args)
-        if handler is not None:
-            log.debug("EVENT HANDLER: %s, %s", handler, args)
-        #
-        handler, args = self._get_namespace_handler(namespace, args)
-        if handler is not None:
-            log.debug("NAMESPACE HANDLER: %s, %s", handler, args)
-        #
         if event == "connect":
             args = list(args)
             args[1] = exposure.prepare_rpc_environ(args[1])
@@ -305,9 +296,13 @@ class SIOGateServer(socketio.Server):
             args = payload.get("args", [])
             kwargs = payload.get("kwargs", {})
             #
-            with self.__lock:
-                method_to_call = getattr(self, method)
-                return method_to_call(*args, **kwargs)
+            return self.pylon_service_handler(method, args, kwargs)
+
+    def pylon_service_handler(self, method, args, kwargs):
+        """ Handle calls from the host """
+        with self.__lock:
+            method_to_call = getattr(self, method)
+            return method_to_call(*args, **kwargs)
 
 
 if __name__ == "__main__":

@@ -268,18 +268,15 @@ def main():
         #
         context.ipc_event_node.subscribe(
             "sio_event",
-            functools.partial(
-                on_sio_event,
-                context=context,
-            )
+            context.sio.pylon_on_gate_event,
         )
-        context.ipc_event_node.subscribe(
-            "sio_ack",
-            functools.partial(
-                on_sio_event,
-                context=context,
-            )
-        )
+        # context.ipc_event_node.subscribe(
+        #     "sio_ack",
+        #     functools.partial(
+        #         on_sio_event,
+        #         context=context,
+        #     )
+        # )
         #
         server.run_server(context)
     except:  # pylint: disable=W0702
@@ -320,9 +317,9 @@ def main():
     log.shutdown()
 
 
-def on_sio_event(event, payload, context):
-    """ Handle events from the gate """
-    log.info("EVENT: event=%s, payload=%s", event, payload)
+# def on_sio_event(event, payload, context):
+#     """ Handle events from the gate """
+#     log.info("EVENT: event=%s, payload=%s", event, payload)
 
 
 def wsgi_request_start(output_stream_id, stream_node, app):
@@ -341,21 +338,34 @@ class SIOHostProxy:
 
     def __init__(self, context):
         self.__context = context
-
-    def emit(self, *args, **kwargs):
-        self.__context.ipc_event_node.emit(
-            "sio_invoke",
-            {
-                "method": "emit",
-                "args": args,
-                "kwargs": kwargs,
-            }
-        )
+        self.__lock = threading.Lock()
+        self.__handlers = {}
+        self.__any_handlers = []
+        #
+        for invoke_event in []:
+            setattr(self, invoke_event, functools.partial(self.pylon_gate_invoke_event, invoke_event))
+        #
+        for invoke_service in [
+                "emit",
+                "call",
+                "enter_room",
+                "leave_room",
+        ]:
+            setattr(self, invoke_service, functools.partial(self.pylon_gate_invoke_service, invoke_service))
 
     def on(self, event, handler=None, namespace=None):
         namespace = namespace or '/'
         #
         def _on(handler):
+            key = (namespace, event)
+            #
+            with self.__lock:
+                if key not in self.__handlers:
+                    self.__handlers[key] = []
+                #
+                if handler not in self.__handlers[key]:
+                    self.__handlers[key].append(handler)
+            #
             return handler
         #
         if handler is None:
@@ -365,15 +375,101 @@ class SIOHostProxy:
 
     def remove_handler(self, event, handler, namespace=None):
         namespace = namespace or "/"
+        #
+        key = (namespace, event)
+        #
+        with self.__lock:
+            if key in self.__handlers and handler in self.__handlers[key]:
+                self.__handlers[key].remove(handler)
+            #
+            if not self.__handlers[key]:
+                del self.__handlers[key]
 
     def pylon_trigger_event(self, event, namespace, *args):
-        pass
+        db_support.create_local_session()
+        try:
+            with self.__lock:
+                any_handlers = list(self.__any_handlers)
+            #
+            for any_handler in any_handlers:
+                try:
+                    any_handler(event, namespace, args)
+                except:  # pylint: disable=W0702
+                    log.exception("Failed to run SIO *any* handler, skipping")
+            #
+            candidates = [
+                ((namespace, event), args, True),
+                ((namespace, "*"), (event, *args), False),
+                (("*", event), (namespace, *args), True),
+                (("*", "*"), (event, namespace, *args), False),
+            ]
+            #
+            for key, target_args, special_allowed in candidates:
+                if not special_allowed and event in ["connect", "disconnect"]:
+                    continue
+                #
+                with self.__lock:
+                    if key not in self.__handlers:
+                        continue
+                    #
+                    handlers = list(self.__handlers[key])
+                #
+                for handler in handlers:
+                    try:
+                        try:
+                            handler(*target_args)
+                        except TypeError:
+                            if event == "disconnect":
+                                handler(*target_args[:-1])
+                            else:
+                                raise
+                    except:  # pylint: disable=W0702
+                        log.exception("Failed to run SIO event handler '%s', skipping", handler)
+                #
+                if handlers:
+                    break
+        finally:
+            db_support.close_local_session()
 
     def pylon_add_any_handler(self, handler):
-        pass
+        with self.__lock:
+            if handler not in self.__any_handlers:
+                self.__any_handlers.append(handler)
 
     def pylon_remove_any_handler(self, handler):
-        pass
+        with self.__lock:
+            if handler in self.__any_handlers:
+                self.__any_handlers.remove(handler)
+
+    def pylon_on_gate_event(self, event, payload):
+        if event != "sio_event" or "event" not in payload:
+            return
+        #
+        sio_event = payload.get("event")
+        sio_namespace = payload.get("namespace", "/")
+        sio_args = payload.get("args", [])
+        #
+        self.pylon_trigger_event(sio_event, sio_namespace, *sio_args)
+
+    def pylon_gate_invoke_event(self, method, *args, **kwargs):
+        self.__context.ipc_event_node.emit(
+            "sio_invoke",
+            {
+                "method": method,
+                "args": args,
+                "kwargs": kwargs,
+            }
+        )
+
+    def pylon_gate_invoke_service(self, method, *args, **kwargs):
+        return self.__context.ipc_service_node.request(
+            "sio_invoke",
+            kwargs={
+                "method": method,
+                "args": args,
+                "kwargs": kwargs,
+            }
+        )
 
 
 class AppRequestThread(threading.Thread):
