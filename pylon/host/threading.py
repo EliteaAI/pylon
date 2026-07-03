@@ -467,6 +467,8 @@ class SIOHostProxy:
         )
 
     def pylon_gate_invoke_service(self, method, *args, **kwargs):
+        log.info("Invoking SIO service method '%s' with args=%s, kwargs=%s", method, args, kwargs)
+        #
         return self.__context.ipc_service_node.request(
             "sio_invoke",
             kwargs={
