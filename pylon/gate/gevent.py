@@ -300,23 +300,26 @@ class SIOGateServer(socketio.Server):
 
     def pylon_service_handler(self, method, args, kwargs):
         """ Handle calls from the host """
+        if "." in method:
+            parts = method.split(".")
+        else:
+            parts = [method]
+        #
+        target = self
+        #
+        for part in parts[:-1]:
+            target = getattr(target, part)
+        #
+        method_to_call = getattr(target, parts[-1])
+        #
         with self.__lock:
-            if "." in method:
-                parts = method.split(".")
-                target = self
-                #
-                for part in parts[:-1]:
-                    target = getattr(target, part)
-                #
-                method_to_call = getattr(target, parts[-1])
-            else:
-                method_to_call = getattr(self, method)
-            #
             result = method_to_call(*args, **kwargs)
-            if isinstance(result, types.GeneratorType):
-                log.warning("Generator result from %s.%s, converting to list", self.__class__.__name__, method)
-                result = list(result)
-            return result
+        #
+        if isinstance(result, types.GeneratorType):
+            log.warning("Generator result from '%s', converting to list", method)
+            result = list(result)
+        #
+        return result
 
 
 if __name__ == "__main__":

@@ -462,6 +462,13 @@ class SIOHostProxy:
         self.pylon_trigger_event(sio_event, sio_namespace, *sio_args)
 
     def pylon_gate_invoke_event(self, method, *args, **kwargs):
+        if method == "emit":
+            if len(args) > 0:
+                args = (str(args[0]), *args[1:])
+            #
+            if "event" in kwargs:
+                kwargs["event"] = str(kwargs["event"])
+        #
         self.__context.ipc_event_node.emit(
             "sio_invoke",
             {
@@ -472,19 +479,12 @@ class SIOHostProxy:
         )
 
     def pylon_gate_invoke_service(self, method, *args, **kwargs):
-        log.info("[Pre] Invoking SIO service method '%s' with args=%s, kwargs=%s", method, args, kwargs)
-        #
         if method == "emit":
-            event = args[0] if len(args) > 0 else kwargs.get("event")
-            if event is not None:
-                event = str(event)
-                #
-                if len(args) > 0:
-                    args = (event, *args[1:])
-                else:
-                    kwargs["event"] = event
-        #
-        log.info("[Post] Invoking SIO service method '%s' with args=%s, kwargs=%s", method, args, kwargs)
+            if len(args) > 0:
+                args = (str(args[0]), *args[1:])
+            #
+            if "event" in kwargs:
+                kwargs["event"] = str(kwargs["event"])
         #
         return self.__context.ipc_service_node.request(
             "sio_invoke",

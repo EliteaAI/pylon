@@ -125,6 +125,9 @@ def main():
         #
         context.ipc_zmq_server.stop()
         #
+        os.unlink("/tmp/ipc_pub.sock")
+        os.unlink("/tmp/ipc_pull.sock")
+        #
         exposure.unexpose_zmq(context)
     #
     if context.settings.get("system", {}).get("kill_remaining_processes", True) and \
