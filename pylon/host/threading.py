@@ -59,6 +59,7 @@ from pylon.core.tools import manager
 from pylon.core.tools import process
 from pylon.core.tools.context import Context
 from pylon.core.tools.signal import ZombieReaper
+from pylon.core.tools.server.splash import boot_splash_hook
 from pylon.framework import toolkit
 from pylon.framework import router
 
@@ -154,7 +155,17 @@ def main():
         os.environ[key] = value
     # Transitional: add server-related data, make root router with hook and start (if gevent)
     server.init_context(context)
+    #
     context.server_mode = "block"
+    context.root_router.hooks.append(boot_splash_hook)
+    context.ipc_service_node.register(
+        functools.partial(
+            wsgi_request_start,
+            stream_node=context.ipc_stream_node,
+            app=context.root_router,
+        ),
+        "wsgi_request_start",
+    )
     # Reinit logging with full config
     log_support.reinit_logging(context)
     # Log pylon ID
@@ -221,6 +232,18 @@ def main():
     #
     context.sio = SIOHostProxy(context)
     #
+    context.ipc_event_node.subscribe(
+        "sio_event",
+        context.sio.pylon_on_gate_event,
+    )
+    # context.ipc_event_node.subscribe(
+    #     "sio_ack",
+    #     functools.partial(
+    #         on_sio_event,
+    #         context=context,
+    #     )
+    # )
+    #
     # Phase: router
     #
     # Init framework router
@@ -257,26 +280,8 @@ def main():
     profiling.profiling_start(context, "run")
     # Run A/WSGI server
     try:
-        context.ipc_service_node.register(
-            functools.partial(
-                wsgi_request_start,
-                stream_node=context.ipc_stream_node,
-                app=context.root_router,
-            ),
-            "wsgi_request_start",
-        )
-        #
-        context.ipc_event_node.subscribe(
-            "sio_event",
-            context.sio.pylon_on_gate_event,
-        )
-        # context.ipc_event_node.subscribe(
-        #     "sio_ack",
-        #     functools.partial(
-        #         on_sio_event,
-        #         context=context,
-        #     )
-        # )
+        if boot_splash_hook in context.root_router.hooks:
+            context.root_router.hooks.remove(boot_splash_hook)
         #
         server.run_server(context)
     except:  # pylint: disable=W0702
