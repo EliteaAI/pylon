@@ -548,16 +548,93 @@ class AppRequestThread(threading.Thread):
 
     def run(self):
         emitter = self.stream_node.get_emitter(self.output_stream_id)
-        # Fix: pass the timeout so queue.Empty is raised (and caught below)
-        # instead of blocking forever when the gate disappears.
         consumer = self.stream_node.get_consumer(
             self.input_stream_id,
             timeout=self.ipc_consumer_timeout,
         )
-        iterator = iter(consumer)
         #
-        environ_data = next(iterator)
+        # The input stream carries three kinds of events from the gate:
+        #   1. The initial environ chunk (first message).
+        #   2. stream_oob "object_call_response" — replies to AppObjectProxy
+        #      calls that happen while the WSGI app is running.
+        #   3. stream_end / stream_exception — terminal signals.
         #
+        # Problem: StreamConsumer.__iter__ is a generator that only dispatches
+        # OOB handlers when it is actively being iterated (i.e. when the WSGI
+        # app yields a chunk).  But AppObjectProxy.__request blocks waiting for
+        # an "object_call_response" OOB while the WSGI app is suspended — so
+        # the generator never advances, the OOB never gets dispatched, and we
+        # deadlock.
+        #
+        # Fix: run a dedicated "pump" thread that continuously drains the raw
+        # stream queue and either:
+        #   - dispatches OOB events to the consumer's registered handlers, or
+        #   - forwards stream_chunk / stream_end / stream_exception to a local
+        #     chunk_queue that the main loop reads from.
+        #
+        # This fully decouples OOB dispatch from chunk iteration.
+        #
+        _SENTINEL = object()
+        chunk_queue = queue.SimpleQueue()
+        #
+        def _pump():
+            try:
+                with self.stream_node.lock:
+                    stream = self.stream_node.streams.get(self.input_stream_id)
+                #
+                if stream is None:
+                    chunk_queue.put(_SENTINEL)
+                    return
+                #
+                while True:
+                    try:
+                        event = stream.get(timeout=self.ipc_consumer_timeout)
+                    except queue.Empty:
+                        # Timeout — treat as stream end so the main thread unblocks.
+                        chunk_queue.put(_SENTINEL)
+                        return
+                    #
+                    event_type = event.get("type")
+                    event_data = event.get("data")
+                    #
+                    if event_type == "stream_end":
+                        chunk_queue.put(_SENTINEL)
+                        return
+                    #
+                    if event_type == "stream_exception":
+                        chunk_queue.put(event)  # forwarded; main loop raises
+                        return
+                    #
+                    if event_type == "stream_oob":
+                        if not isinstance(event_data, dict):
+                            continue
+                        oob_tag = event_data.get("tag")
+                        oob_payload = event_data.get("payload")
+                        with consumer.oob_handlers_lock:
+                            handlers = list(consumer.oob_handlers.get(oob_tag, []))
+                        for handler in handlers:
+                            try:
+                                handler(oob_tag, oob_payload)
+                            except:  # pylint: disable=W0702
+                                log.exception("OOB handler '%s' failed, skipping", handler)
+                        continue
+                    #
+                    if event_type == "stream_chunk":
+                        chunk_queue.put(event)
+            finally:
+                self.stream_node.remove_stream(self.input_stream_id)
+        #
+        pump_thread = threading.Thread(target=_pump, daemon=True)
+        pump_thread.start()
+        #
+        # Read the first message (environ) directly from chunk_queue.
+        first = chunk_queue.get()
+        if first is _SENTINEL or first.get("type") == "stream_exception":
+            # Stream ended or errored before we got the environ — nothing to do.
+            pump_thread.join()
+            return
+        #
+        environ_data = first["data"]
         environ = environ_data["environ"]
         for obj_name in environ_data["objects"]:
             environ[obj_name] = AppObjectProxy(
@@ -589,6 +666,8 @@ class AppRequestThread(threading.Thread):
         else:
             # log.info("End")
             emitter.end()
+        #
+        pump_thread.join()
 
 
 class AppObjectProxy:  # pylint: disable=R0903
