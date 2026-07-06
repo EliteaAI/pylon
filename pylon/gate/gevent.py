@@ -240,7 +240,17 @@ def wsgi_app(environ, start_response, stream_node, service_node):
         "objects": objs,
     })
     #
-    return iter(consumer)
+    # Wrap the response consumer iterator so that we close the request stream
+    # (emitter.end) once the response is fully consumed.  Without this the
+    # host-side pump thread blocks on stream.get() forever waiting for a
+    # stream_end that never arrives, causing pump_thread.join() to hang.
+    def _response_iter():
+        try:
+            yield from consumer
+        finally:
+            emitter.end()
+    #
+    return _response_iter()
 
 
 def websocket_upgrade_hook(handler):
