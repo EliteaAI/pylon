@@ -107,7 +107,7 @@ def main():
         connect_sub=args.ipc_socket_pub,
         connect_push=args.ipc_socket_pull,
         topic="pylon_ipc",
-        callback_workers=None,
+        callback_workers=None,  # intentional
     )
     context.event_node.start()
     #
@@ -207,22 +207,34 @@ def wsgi_app(environ, start_response, stream_node, service_node):
         #
         # log.info("Call: %s", payload)
         #
-        try:
-            return_data = getattr(
-                environ.get(payload["object_name"]), payload["method_name"]
-            )(
-                *payload["args"],
-                **payload["kwargs"],
-            )
-            #
-            emitter.chunk({
-                "return": return_data,
-            })
-        except BaseException as exception_data:  # pylint: disable=W0703
-            # TODO: exception wrap?
-            emitter.chunk({
-                "raise": exception_data,
-            })
+        call_id = payload.get("call_id")
+        #
+        # Fix: run the actual object method in a separate greenlet so that
+        # blocking I/O (e.g. wsgi.input.read()) does not stall the gevent
+        # event loop and starve other concurrent requests.
+        def _do_call():
+            try:
+                return_data = getattr(
+                    environ.get(payload["object_name"]), payload["method_name"]
+                )(
+                    *payload["args"],
+                    **payload["kwargs"],
+                )
+                #
+                # Fix: send the response via a dedicated OOB tag so it never
+                # lands in the main stream-chunk sequence that the host's
+                # AppRequestThread iterates over.
+                emitter.oob("object_call_response", {
+                    "call_id": call_id,
+                    "return": return_data,
+                })
+            except BaseException as exception_data:  # pylint: disable=W0703
+                emitter.oob("object_call_response", {
+                    "call_id": call_id,
+                    "raise": exception_data,
+                })
+        #
+        gevent.spawn(_do_call)
     #
     consumer.register_oob_handler("object_call", _object_call)
     #

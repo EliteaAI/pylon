@@ -29,6 +29,7 @@
 import os
 import sys
 import uuid
+import queue
 import socket
 import argparse
 import signal
@@ -113,7 +114,7 @@ def main():
         connect_sub=args.ipc_socket_pub,
         connect_push=args.ipc_socket_pull,
         topic="pylon_ipc",
-        callback_workers=None,
+        callback_workers=None,  # intentional
     )
     context.ipc_event_node.start()
     #
@@ -163,6 +164,11 @@ def main():
             wsgi_request_start,
             stream_node=context.ipc_stream_node,
             app=context.root_router,
+            # Fix: read timeout from settings so operators can tune it;
+            # default 600 s matches typical long-running streaming requests.
+            ipc_consumer_timeout=context.settings.get(
+                "server", {}
+            ).get("ipc_consumer_timeout", 600),
         ),
         "wsgi_request_start",
     )
@@ -327,12 +333,15 @@ def main():
 #     log.info("EVENT: event=%s, payload=%s", event, payload)
 
 
-def wsgi_request_start(output_stream_id, stream_node, app):
+def wsgi_request_start(output_stream_id, stream_node, app, ipc_consumer_timeout=600):
     input_stream_id = stream_node.add_stream()
     #
     # Idea: using threadpool if needed
     #
-    request_thread = AppRequestThread(app, stream_node, input_stream_id, output_stream_id)
+    request_thread = AppRequestThread(
+        app, stream_node, input_stream_id, output_stream_id,
+        ipc_consumer_timeout=ipc_consumer_timeout,
+    )
     request_thread.start()
     #
     return input_stream_id
@@ -517,7 +526,8 @@ class SIOObjectProxy:  # pylint: disable=R0903
 
 
 class AppRequestThread(threading.Thread):
-    def __init__(self, app, stream_node, input_stream_id, output_stream_id):
+    def __init__(self, app, stream_node, input_stream_id, output_stream_id,
+                 ipc_consumer_timeout=600):
         super().__init__(daemon=True)
         #
         self.app = app
@@ -526,11 +536,24 @@ class AppRequestThread(threading.Thread):
         self.input_stream_id = input_stream_id
         self.output_stream_id = output_stream_id
         #
+        # Fix: use a finite timeout so the thread does not block forever if
+        # the gate closes the connection or crashes mid-request.
+        self.ipc_consumer_timeout = ipc_consumer_timeout
+        #
+        # Fix: proxy_lock is no longer needed for iterator safety (each OOB
+        # call now uses its own side-channel queue), but keep it to serialise
+        # concurrent object_call OOBs from app-spawned threads so the gate
+        # does not have to handle overlapping calls on the same object.
         self.proxy_lock = threading.Lock()
 
     def run(self):
         emitter = self.stream_node.get_emitter(self.output_stream_id)
-        consumer = self.stream_node.get_consumer(self.input_stream_id)
+        # Fix: pass the timeout so queue.Empty is raised (and caught below)
+        # instead of blocking forever when the gate disappears.
+        consumer = self.stream_node.get_consumer(
+            self.input_stream_id,
+            timeout=self.ipc_consumer_timeout,
+        )
         iterator = iter(consumer)
         #
         environ_data = next(iterator)
@@ -538,7 +561,7 @@ class AppRequestThread(threading.Thread):
         environ = environ_data["environ"]
         for obj_name in environ_data["objects"]:
             environ[obj_name] = AppObjectProxy(
-                obj_name, emitter, iterator, self.proxy_lock,
+                obj_name, emitter, consumer, self.proxy_lock,
                 blacklist=[
                     "readinto",
                     "readinto1",
@@ -573,33 +596,52 @@ class AppObjectProxy:  # pylint: disable=R0903
 
     def __init__(  # pylint: disable=R0913
             self, obj_name,
-            stream_emitter, consumer_iterator,
+            stream_emitter, consumer,
             proxy_lock,
             blacklist=None,
     ):
         self.__obj_name = obj_name
         self.__stream_emitter = stream_emitter
-        self.__consumer_iterator = consumer_iterator
+        # Fix: store the consumer (not the raw iterator) so we can register
+        # per-call OOB handlers on it for the response side-channel.
+        self.__consumer = consumer
         self.__proxy_lock = proxy_lock
         self.__blacklist = blacklist.copy() if blacklist is not None else []
         self.__partials = {}
 
     def __request(self, method_name, *args, **kwargs):
-        with self.__proxy_lock:
-            self.__stream_emitter.oob(
-                "object_call", {
-                    "object_name": self.__obj_name,
-                    "method_name": method_name,
-                    "args": args,
-                    "kwargs": kwargs,
-                })
+        # Fix: each call gets its own response queue registered as an OOB
+        # handler under the 'object_call_response' tag.  The gate sends the
+        # result back via emitter.oob('object_call_response', ...) so it
+        # never appears in the main stream-chunk sequence.
+        call_id = str(uuid.uuid4())
+        response_queue = queue.SimpleQueue()
+        #
+        def _response_handler(tag, payload):  # pylint: disable=W0613
+            if payload.get("call_id") == call_id:
+                response_queue.put(payload)
+        #
+        self.__consumer.register_oob_handler("object_call_response", _response_handler)
+        #
+        try:
+            with self.__proxy_lock:
+                self.__stream_emitter.oob(
+                    "object_call", {
+                        "call_id": call_id,
+                        "object_name": self.__obj_name,
+                        "method_name": method_name,
+                        "args": args,
+                        "kwargs": kwargs,
+                    })
             #
-            result_data = next(self.__consumer_iterator)
-            #
-            if "raise" in result_data:
-                raise result_data.get("raise", RuntimeError())
-            #
-            return result_data.get("return", None)
+            result_data = response_queue.get()
+        finally:
+            self.__consumer.unregister_oob_handler("object_call_response", _response_handler)
+        #
+        if "raise" in result_data:
+            raise result_data.get("raise", RuntimeError())
+        #
+        return result_data.get("return", None)
 
     def __getattr__(self, name):
         # log.info("Attr: %s", name)
