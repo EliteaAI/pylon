@@ -47,16 +47,18 @@ gevent.hub.Hub.NOT_ERROR = tuple(hub_not_errors)
 #
 # Normal imports and code below
 #
-
+import os
 import sys
 import types
 import signal
 import argparse
 import functools
+import traceback
 
 import gevent  # pylint: disable=E0401
 import arbiter  # pylint: disable=E0401
 import socketio  # pylint: disable=E0401
+from gevent.util import format_run_info  # pylint: disable=E0611,E0401
 from gevent.pywsgi import WSGIServer  # pylint: disable=E0401,C0412,C0415
 from geventwebsocket.handler import WebSocketHandler  # pylint: disable=E0401,C0412,C0415
 
@@ -70,6 +72,34 @@ from pylon.core.tools.server import wsgi
 from pylon.framework import toolkit
 
 
+def dump_threads_handler(signum, frame):
+    """Signal handler to dump all thread stacks to stderr without limits."""
+    # Write directly to stderr using a separator line
+    sys.stderr.write(f"\n--- THREAD DUMP (PID {os.getpid()}) ---\n")
+    
+    # Extract the current execution frames for all active threads
+    for thread_id, stack_frame in sys._current_frames().items():
+        sys.stderr.write(f"\nStack trace for Thread ID: {thread_id}\n")
+        
+        # limit=None ensures the complete call stack is extracted
+        # file=sys.stderr sends the trace to your standard error console
+        traceback.print_stack(f=stack_frame, limit=None, file=sys.stderr)
+        
+    sys.stderr.write("--- END OF THREAD DUMP ---\n")
+    sys.stderr.flush()
+
+
+def signal_sigusr2(signal_num, stack_frame):
+    """ SIGUSR2 signal handler: dump runtime info """
+    _ = signal_num, stack_frame
+    #
+    log.info("Gevent run info:")
+    #
+    run_info = format_run_info()
+    for line in run_info:
+        log.info("%s", line)
+
+
 def main():
     """ Entry point """
     context = Context()
@@ -78,6 +108,8 @@ def main():
     #
     signal.signal(signal.SIGINT, lambda signum, frame: context.stop_event.set())
     signal.signal(signal.SIGTERM, lambda signum, frame: context.stop_event.set())
+    signal.signal(signal.SIGUSR1, dump_threads_handler)
+    signal.signal(signal.SIGUSR2, signal_sigusr2)
     #
     parser = argparse.ArgumentParser(description="Pylon gate")
     # parser.add_argument("--config", type=str, default="/etc/pylon/config.yaml", help="Path to the configuration file")
