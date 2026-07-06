@@ -91,6 +91,7 @@ def main():
     signal.signal(signal.SIGINT, lambda signum, frame: context.stop_event.set())
     signal.signal(signal.SIGTERM, lambda signum, frame: context.stop_event.set())
     signal.signal(signal.SIGUSR1, dump_threads_handler)
+    signal.signal(signal.SIGUSR2, dump_threads_handler)
     #
     parser = argparse.ArgumentParser(description="Pylon host")
     parser.add_argument("--config-seed", type=str, default=env.get_var("CONFIG_SEED", None), help="Configuration seed")
