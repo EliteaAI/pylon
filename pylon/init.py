@@ -97,16 +97,23 @@ def main():
     context.server_mode = "init"
     #
     if context.settings.get("server", {}).get("mode", "web") == "web":
-        # Gate variant: "gevent" (default) or "hypercorn" (HTTP/2 & HTTP/3).
-        # gate_variant = context.settings.get("server", {}).get(
-        #     "gate", env.get_var("GATE", "gevent"),
-        # )
-        # gate_module = {
-        #     "gevent": "pylon.gate.gevent",
-        #     "hypercorn": "pylon.gate.hypercorn",
-        # }.get(gate_variant, "pylon.gate.gevent")
+        default_gate_variant = "hypercorn"
         #
-        gate_module = "pylon.gate.hypercorn"
+        gate_variant = context.settings.get("server", {}).get("gate", default_gate_variant)
+        gate_modules = {
+            "gevent": "pylon.gate.gevent",
+            "hypercorn": "pylon.gate.hypercorn",
+        }
+        #
+        if gate_variant not in gate_modules:
+            log.warning(
+                "Unknown gate variant '%s', falling back to default '%s'",
+                gate_variant,
+                default_gate_variant,
+            )
+            gate_variant = default_gate_variant
+        #
+        gate_module = gate_modules[gate_variant]
         #
         context.gate_subpylon = process.SubpylonInstance(context, {
             "name": "gate",
