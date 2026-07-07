@@ -97,9 +97,20 @@ def main():
     context.server_mode = "init"
     #
     if context.settings.get("server", {}).get("mode", "web") == "web":
+        # Gate variant: "gevent" (default) or "hypercorn" (HTTP/2 & HTTP/3).
+        # gate_variant = context.settings.get("server", {}).get(
+        #     "gate", env.get_var("GATE", "gevent"),
+        # )
+        # gate_module = {
+        #     "gevent": "pylon.gate.gevent",
+        #     "hypercorn": "pylon.gate.hypercorn",
+        # }.get(gate_variant, "pylon.gate.gevent")
+        #
+        gate_module = "pylon.gate.hypercorn"
+        #
         context.gate_subpylon = process.SubpylonInstance(context, {
             "name": "gate",
-            "command": [sys.executable, "-m", "pylon.gate.gevent"],
+            "command": [sys.executable, "-m", gate_module],
         })
         context.gate_subpylon.start()
     else:
