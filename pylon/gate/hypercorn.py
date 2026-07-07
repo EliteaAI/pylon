@@ -47,6 +47,7 @@
 
 import io
 import sys
+import types
 import signal
 import argparse
 import functools
@@ -485,6 +486,12 @@ class SIOGateServer(socketio.AsyncServer):
         #
         if event == "connect":
             args = list(args)
+            # The connect environ carries an async wsgi.input (socketio's ASGI
+            # AwaitablePayload).  prepare_rpc_environ reads it via asyncio.run(),
+            # which fails inside this running loop and drops the body to b"".
+            # Materialise it here (we're on the loop) into a sync BytesIO so
+            # prepare_rpc_environ takes its synchronous read path.
+            await self._materialise_wsgi_input(args[1])
             args[1] = exposure.prepare_rpc_environ(args[1])
             args = tuple(args)
         #
@@ -498,6 +505,36 @@ class SIOGateServer(socketio.AsyncServer):
         )
         #
         return self.not_handled
+
+    @staticmethod
+    async def _materialise_wsgi_input(environ):
+        """ Replace an async wsgi.input with a sync BytesIO holding its bytes
+
+        socketio's ASGI layer puts an awaitable-read payload under
+        environ['wsgi.input'].  We're on the event loop here, so read it now;
+        prepare_rpc_environ (called next) then takes its sync .read() path.
+        """
+        if not isinstance(environ, dict):
+            return
+        #
+        wsgi_input = environ.get("wsgi.input")
+        if wsgi_input is None:
+            return
+        #
+        read = getattr(wsgi_input, "read", None)
+        if read is None:
+            return
+        #
+        try:
+            if asyncio.iscoroutinefunction(read):
+                data = await read()
+            else:
+                data = read()
+            #
+            environ["wsgi.input"] = io.BytesIO(data or b"")
+        except:  # pylint: disable=W0702
+            log.exception("Failed to materialise wsgi.input, using empty body")
+            environ["wsgi.input"] = io.BytesIO(b"")
 
     def pylon_event_handler(self, event, payload):
         """ Handle fire-and-forget events from the host (arbiter callback thread) """
@@ -530,13 +567,31 @@ class SIOGateServer(socketio.AsyncServer):
         return future.result()
 
     async def _handle_sio_invoke(self, method, args, kwargs):
-        """ Actual async invocation scheduled on the event loop """
+        """ Actual async invocation scheduled on the event loop
+
+        `method` may be a dotted path (e.g. "manager.get_participants") that
+        traverses attributes before the final call — matching the gevent
+        gate's pylon_service_handler contract.
+        """
         async with self.__lock:
-            method_to_call = getattr(self, method)
+            parts = method.split(".") if "." in method else [method]
+            #
+            target = self
+            for part in parts[:-1]:
+                target = getattr(target, part)
+            #
+            method_to_call = getattr(target, parts[-1])
+            #
             result = method_to_call(*args, **kwargs)
             #
             if asyncio.iscoroutine(result):
                 result = await result
+            #
+            # Generators are not picklable and cannot cross the bus back to the
+            # host; materialise them (e.g. manager.get_participants()).
+            if isinstance(result, types.GeneratorType):
+                log.warning("Generator result from '%s', converting to list", method)
+                result = list(result)
             #
             return result
 
