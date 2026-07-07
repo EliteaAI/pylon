@@ -65,6 +65,7 @@ from pylon.core.tools import package
 from pylon.core.tools import exposure
 from pylon.core.tools.context import Context
 from pylon.core.tools.server import asgi as asgi_router
+from pylon.gate import build_sio_kwargs, load_socketio_config
 from pylon.framework import toolkit
 
 
@@ -128,7 +129,8 @@ async def async_main():  # pylint: disable=R0914,R0915
     context.stream_node.start()
     #
     # Socket.IO — async variant
-    context.sio = SIOGateServer(context, async_mode="asgi")
+    sio_kwargs = build_sio_kwargs(load_socketio_config())
+    context.sio = SIOGateServer(context, async_mode="asgi", **sio_kwargs)
     #
     # Subscribe sio_invoke events — bridged async → event loop.
     context.event_node.subscribe("sio_invoke", context.sio.pylon_event_handler)

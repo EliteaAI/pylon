@@ -69,6 +69,7 @@ from pylon.core.tools import package
 from pylon.core.tools import exposure
 from pylon.core.tools.context import Context
 from pylon.core.tools.server import wsgi
+from pylon.gate import build_sio_kwargs, load_socketio_config
 from pylon.framework import toolkit
 
 
@@ -149,7 +150,8 @@ def main():
     context.stream_node = arbiter.StreamNode(context.event_node, id_prefix="gate:")
     context.stream_node.start()
     #
-    context.sio = SIOGateServer(context, async_mode="gevent")
+    sio_kwargs = build_sio_kwargs(load_socketio_config())
+    context.sio = SIOGateServer(context, async_mode="gevent", **sio_kwargs)
     #
     context.event_node.subscribe("sio_invoke", context.sio.pylon_event_handler)
     context.service_node.register(context.sio.pylon_service_handler, "sio_invoke")
