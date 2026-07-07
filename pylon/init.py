@@ -97,7 +97,7 @@ def main():
     context.server_mode = "init"
     #
     if context.settings.get("server", {}).get("mode", "web") == "web":
-        default_gate_variant = "hypercorn"
+        default_gate_variant = "gevent"
         #
         gate_variant = context.settings.get("server", {}).get("gate", default_gate_variant)
         gate_modules = {
