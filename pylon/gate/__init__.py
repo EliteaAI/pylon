@@ -15,31 +15,6 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-""" Pylon gate """
-
-from pylon.core.tools import log
-from pylon.core.tools import env
-from pylon.core.tools import seed
-
-
-def load_socketio_config():
-    """ Load the socketio config from the config seed (best-effort)
-
-    The gate runs as its own subpylon and does not go through the full host
-    init, so it loads just the settings it needs.  Returns the "socketio"
-    section of the parsed settings, or {} if unavailable.
-    """
-    config_seed = env.get_var("CONFIG_SEED", None)
-    #
-    try:
-        _, settings = seed.load_settings_from_seed(config_seed, return_data_first=True)
-        if settings:
-            return settings.get("socketio", {}) or {}
-    except:  # pylint: disable=W0702
-        log.exception("Failed to load socketio config from seed, using defaults")
-    #
-    return {}
-
 
 def build_sio_kwargs(socketio_config):
     """ Build common SIO server kwargs (CORS + selected passthroughs)

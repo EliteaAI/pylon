@@ -65,7 +65,10 @@ from pylon.core.tools import package
 from pylon.core.tools import exposure
 from pylon.core.tools.context import Context
 from pylon.core.tools.server import asgi as asgi_router
-from pylon.gate import build_sio_kwargs, load_socketio_config
+from pylon.core.tools import env
+from pylon.core.tools import seed
+from pylon.core.tools import db_support
+from pylon.gate import build_sio_kwargs
 from pylon.framework import toolkit
 
 
@@ -86,6 +89,7 @@ async def async_main():  # pylint: disable=R0914,R0915
     loop.add_signal_handler(signal.SIGTERM, context.stop_event.set)
     #
     parser = argparse.ArgumentParser(description="Pylon gate (hypercorn)")
+    parser.add_argument("--config-seed", type=str, default=env.get_var("CONFIG_SEED", None), help="Configuration seed")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--ipc-socket-pub", type=str, default="ipc:///tmp/ipc_pub.sock", help="Path to the pub IPC socket")
     parser.add_argument("--ipc-socket-pull", type=str, default="ipc:///tmp/ipc_pull.sock", help="Path to the pull IPC socket")
@@ -108,6 +112,20 @@ async def async_main():  # pylint: disable=R0914,R0915
     #
     context.web_runtime = "asyncio"  # Needed for downstream components (dynamic runtime detection)
     #
+    # Load settings from the config seed (same pattern as pylon.init): load,
+    # apply tunable settings via a transient DB connection, then de-init the DB.
+    log.info("Loading and parsing settings")
+    context.settings_data, context.settings = seed.load_settings_from_seed(
+        args.config_seed, return_data_first=True,
+    )
+    if not context.settings:
+        log.error("Settings are empty or invalid. Exiting")
+        sys.exit(1)
+    #
+    db_support.basic_init(context)
+    seed.apply_tunable_settings(context)
+    db_support.basic_deinit(context)
+    #
     # IPC transport stays thread-based (delivers events on callback threads).
     context.event_node = arbiter.ZeroMQEventNode(
         connect_sub=args.ipc_socket_pub,
@@ -129,7 +147,7 @@ async def async_main():  # pylint: disable=R0914,R0915
     context.stream_node.start()
     #
     # Socket.IO — async variant
-    sio_kwargs = build_sio_kwargs(load_socketio_config())
+    sio_kwargs = build_sio_kwargs(context.settings.get("socketio", {}))
     context.sio = SIOGateServer(context, async_mode="asgi", **sio_kwargs)
     #
     # Subscribe sio_invoke events — bridged async → event loop.

@@ -67,9 +67,12 @@ from pylon.core.tools import log
 from pylon.core.tools import log_support
 from pylon.core.tools import package
 from pylon.core.tools import exposure
+from pylon.core.tools import env
+from pylon.core.tools import seed
+from pylon.core.tools import db_support
 from pylon.core.tools.context import Context
 from pylon.core.tools.server import wsgi
-from pylon.gate import build_sio_kwargs, load_socketio_config
+from pylon.gate import build_sio_kwargs
 from pylon.framework import toolkit
 
 
@@ -114,6 +117,7 @@ def main():
     #
     parser = argparse.ArgumentParser(description="Pylon gate")
     # parser.add_argument("--config", type=str, default="/etc/pylon/config.yaml", help="Path to the configuration file")
+    parser.add_argument("--config-seed", type=str, default=env.get_var("CONFIG_SEED", None), help="Configuration seed")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--ipc-socket-pub", type=str, default="ipc:///tmp/ipc_pub.sock", help="Path to the pub IPC socket")
     parser.add_argument("--ipc-socket-pull", type=str, default="ipc:///tmp/ipc_pull.sock", help="Path to the pull IPC socket")
@@ -136,6 +140,23 @@ def main():
     #
     context.web_runtime = "gevent"  # Needed for downstream components (that are using dynamic runtime detection)
     #
+    # Load settings from the config seed (same pattern as pylon.init): load,
+    # apply tunable settings via a transient DB connection, then de-init the
+    # DB.  The gate does not run the full host init, but it needs the resolved
+    # server.* config (host/port, kwargs, url_prefix / socket.io route), and
+    # tunable settings may override those.
+    log.info("Loading and parsing settings")
+    context.settings_data, context.settings = seed.load_settings_from_seed(
+        args.config_seed, return_data_first=True,
+    )
+    if not context.settings:
+        log.error("Settings are empty or invalid. Exiting")
+        os._exit(1)  # pylint: disable=W0212
+    #
+    db_support.basic_init(context)
+    seed.apply_tunable_settings(context)
+    db_support.basic_deinit(context)
+    #
     context.event_node = arbiter.ZeroMQEventNode(
         connect_sub=args.ipc_socket_pub,
         connect_push=args.ipc_socket_pull,
@@ -150,7 +171,22 @@ def main():
     context.stream_node = arbiter.StreamNode(context.event_node, id_prefix="gate:")
     context.stream_node.start()
     #
-    sio_kwargs = build_sio_kwargs(load_socketio_config())
+    server_config = context.settings.get("server", {})
+    #
+    # url_prefix (matches server/init.py) and the socket.io route (matches
+    # app.py add_socketio_app), so the gate mounts socket.io where clients
+    # (and the host) expect it.
+    context.url_prefix = server_config.get("path", "/")
+    while context.url_prefix.endswith("/"):
+        context.url_prefix = context.url_prefix[:-1]
+    #
+    socketio_path = "socket.io"
+    if context.url_prefix:
+        socketio_path = f"{context.url_prefix}/{socketio_path}"
+    context.socketio_route = f'/{socketio_path.strip("/")}/'
+    #
+    socketio_config = context.settings.get("socketio", {})
+    sio_kwargs = build_sio_kwargs(socketio_config)
     context.sio = SIOGateServer(context, async_mode="gevent", **sio_kwargs)
     #
     context.event_node.subscribe("sio_invoke", context.sio.pylon_event_handler)
@@ -162,21 +198,30 @@ def main():
         stream_node=context.stream_node,
         service_node=context.service_node,
     )
-    context.app.map["/socket.io/"] = socketio.WSGIApp(
+    context.app.map[context.socketio_route] = socketio.WSGIApp(
         socketio_app=context.sio,
         socketio_path="/",
     )
     #
+    # Bind + server kwargs from settings (matches server/gevent.py make_server):
+    # server.host / server.port default to the SERVER_DEFAULT_* constants, and
+    # server.kwargs carries TLS certfile/keyfile, backlog, spawn pool, etc.
+    host = server_config.get("host", args.host)
+    port = server_config.get("port", args.http_port)
+    #
     context.http_server = WSGIServer(
         (
-            args.host,
-            args.http_port
+            host,
+            port,
         ),
         context.app,
         handler_class=WebSocketHandler,
+        **server_config.get("kwargs", {}),
     )
     #
     setattr(context.http_server, "pre_start_hook", websocket_upgrade_hook)
+    #
+    log.info("Gate listening on %s:%s (url_prefix: %s)", host, port, context.url_prefix or "/")
     #
     context.http_server.start()
     #
@@ -288,7 +333,16 @@ def wsgi_app(environ, start_response, stream_node, service_node):
 
 
 def websocket_upgrade_hook(handler):
-    route = "/socket.io/"
+    from tools import context  # pylint: disable=E0401,C0415
+    #
+    # Honor the configured (possibly url_prefix'd) socket.io route, matching
+    # the legacy _http_server_pre_start_hook.  Fall back to the default if the
+    # gate has not set it yet.
+    try:
+        route = context.socketio_route
+    except:  # pylint: disable=W0702
+        route = "/socket.io/"
+    #
     route_item = route.rstrip("/")
     #
     app_path = handler.environ.get("PATH_INFO", "")
