@@ -713,7 +713,7 @@ class ModuleManager:  # pylint: disable=R0902
         target_module = "pip"
         target_args = []
         #
-        if self.resolve_settings("requirements.install_via_prefix", False):
+        if self.resolve_settings("requirements.install_via_prefix", sys.platform == "darwin"):
             target_args.append("--prefix")
             target_args.append(target_site_base)
             #
@@ -807,7 +807,7 @@ class ModuleManager:  # pylint: disable=R0902
             environ["PYTHONPATH"] = os.pathsep.join(additional_site_paths)
         #
         target_args = []
-        if self.resolve_settings("requirements.install_via_prefix", False):
+        if self.resolve_settings("requirements.install_via_prefix", sys.platform == "darwin"):
             target_args.append("--path")
             target_args.append(self.get_user_site_path(target_site_base))
         else:
