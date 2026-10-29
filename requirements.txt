@@ -64,7 +64,7 @@ pamqp==3.3.0
 kombu==5.6.1
 
 # Auth
-redis-entraid==1.2.1
+redis-entraid==1.2.2
 azure-identity==1.25.3
 azure-keyvault-secrets==4.11.0
 
