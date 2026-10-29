@@ -42,7 +42,7 @@ pydantic==2.12.5
 marshmallow==4.2.2
 
 # SSL
-certifi==2025.11.12
+certifi==2026.10.23
 
 # HTTP
 urllib3==2.8.0
