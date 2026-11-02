@@ -60,3 +60,22 @@ jobs:
           build-args: |
             BUILDKIT_CONTEXT_KEEP_GIT_DIR=true
             BASE_IMAGE=${{ inputs.docker_tag }}
+
+  scan:
+    needs: docker
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ${{ inputs.docker_tag }}
+            category: trivy-pylon
+          - image: ${{ inputs.docker_tag }}-tools
+            category: trivy-pylon-tools
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    uses: ./.github/workflows/trivy_scan.yml
+    with:
+      image: ${{ matrix.image }}
+      category: ${{ matrix.category }}

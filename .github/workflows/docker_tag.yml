@@ -56,3 +56,22 @@ jobs:
           build-args: |
             BUILDKIT_CONTEXT_KEEP_GIT_DIR=true
             BASE_IMAGE=ghcr.io/eliteaai/pylon:${{ github.ref_name }}
+
+  scan:
+    needs: docker-tag
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ghcr.io/eliteaai/pylon:${{ github.ref_name }}
+            category: trivy-pylon
+          - image: ghcr.io/eliteaai/pylon:${{ github.ref_name }}-tools
+            category: trivy-pylon-tools
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    uses: ./.github/workflows/trivy_scan.yml
+    with:
+      image: ${{ matrix.image }}
+      category: ${{ matrix.category }}
