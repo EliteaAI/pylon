@@ -63,9 +63,24 @@ jobs:
             --output trivy.json
 
       - name: Convert results
+        env:
+          IMAGE: ${{ inputs.image }}
         run: |
-          trivy convert --format sarif --output trivy.sarif trivy.json
+          trivy convert --format sarif --output trivy.raw.sarif trivy.json
           trivy convert --format table --output trivy.txt trivy.json
+          # Add scanned image and digest to every alert, so it is visible in Security -> Code scanning
+          DIGEST=$(jq -r '(.Metadata.RepoDigests[0] // "") | sub("^[^@]*@"; "")' trivy.json)
+          echo "DIGEST=$DIGEST" >> "$GITHUB_ENV"
+          jq --arg image "$IMAGE" --arg digest "$DIGEST" '
+            ("Image: " + $image + (if $digest != "" then "\nImage digest: " + $digest else "" end)) as $info
+            | ("**Image:** `" + $image + "`" + (if $digest != "" then "  \n**Image digest:** `" + $digest + "`" else "" end)) as $md
+            | .runs[].results[]?.message.text |= ($info + "\n" + .)
+            | .runs[].tool.driver.rules[]?.help |= (
+                if . == null then . else
+                  (.text |= ($info + "\n" + (. // "")))
+                  | (.markdown |= ($md + "\n\n" + (. // "")))
+                end)
+          ' trivy.raw.sarif > trivy.sarif
 
       - name: Write job summary
         env:
@@ -73,6 +88,7 @@ jobs:
         run: |
           {
             echo "## Trivy scan: \`$IMAGE\`"
+            [ -n "$DIGEST" ] && echo "Image digest: \`$DIGEST\`"
             echo "Severity: HIGH, CRITICAL (fixable only). Full results: Security -> Code scanning."
             echo '```'
             head -c 900000 trivy.txt
