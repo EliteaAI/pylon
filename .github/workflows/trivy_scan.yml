@@ -25,6 +25,13 @@ on:
         required: true
         default: "trivy-pylon"
         type: string
+      runner:
+        type: choice
+        description: 'Action runs on'
+        options:
+          - self-hosted
+          - ubuntu-latest
+        required: true
 
 permissions:
   contents: read
@@ -36,7 +43,7 @@ env:
 
 jobs:
   trivy:
-    runs-on: self-hosted
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.runner || fromJSON('["self-hosted", "Linux"]') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
