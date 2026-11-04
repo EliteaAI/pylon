@@ -297,12 +297,20 @@ class SIOEventHandler:  # pylint: disable=R0903
         self.handlers = []
 
     def __call__(self, *args, **kwargs):
-        """ Call handler """
+        """ Call handlers, return the last non-None result as the event ACK """
+        result = None
+        #
         for handler in self.handlers:
             try:
-                handler(*args, **kwargs)
+                handler_result = handler(*args, **kwargs)
             except:  # pylint: disable=W0702
                 log.exception("Failed to run SIO event handler '%s', skipping", handler)
+                continue
+            #
+            if handler_result is not None:
+                result = handler_result
+        #
+        return result
 
 
 class SIOPatchedServer(socketio.Server):  # pylint: disable=R0903
@@ -423,17 +431,25 @@ class SIOAsyncEventHandler:  # pylint: disable=R0903
         self.handlers = []
 
     async def __call__(self, *args, **kwargs):
-        """ Call handler """
+        """ Call handlers, return the last non-None result as the event ACK """
         import asyncio  # pylint: disable=E0401,C0412,C0415
+        #
+        result = None
         #
         for handler in self.handlers:
             try:
                 if asyncio.iscoroutinefunction(handler):
-                    await handler(*args, **kwargs)
+                    handler_result = await handler(*args, **kwargs)
                 else:
-                    handler(*args, **kwargs)
+                    handler_result = handler(*args, **kwargs)
             except:  # pylint: disable=W0702
                 log.exception("Failed to run SIO event handler '%s', skipping", handler)
+                continue
+            #
+            if handler_result is not None:
+                result = handler_result
+        #
+        return result
 
 
 class SIOPatchedAsyncServer(socketio.AsyncServer):  # pylint: disable=R0903
