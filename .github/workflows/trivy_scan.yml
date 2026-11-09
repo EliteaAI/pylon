@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       image:
-        description: "Image reference to scan, e.g. ghcr.io/eliteaai/pylon:1.2.30"
+        description: "Image reference to scan, e.g. ghcr.io/eliteaai/pylon:1.2.31"
         required: true
         type: string
       category:
@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       image:
-        description: "Image reference to scan, e.g. ghcr.io/eliteaai/pylon:1.2.30"
+        description: "Image reference to scan, e.g. ghcr.io/eliteaai/pylon:1.2.31"
         required: true
         type: string
       category:
@@ -31,6 +31,7 @@ on:
         options:
           - self-hosted
           - ubuntu-latest
+        default: self-hosted
         required: true
 
 permissions:
