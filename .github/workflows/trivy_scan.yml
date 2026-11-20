@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       image:
-        description: "Image reference to scan, e.g. ghcr.io/eliteaai/pylon:1.2.31"
+        description: "Image reference to scan, e.g. ghcr.io/eliteaai/pylon:1.2.32"
         required: true
         type: string
       category:
@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       image:
-        description: "Image reference to scan, e.g. ghcr.io/eliteaai/pylon:1.2.31"
+        description: "Image reference to scan, e.g. ghcr.io/eliteaai/pylon:1.2.32"
         required: true
         type: string
       category:
@@ -40,7 +40,7 @@ permissions:
   security-events: write
 
 env:
-  TRIVY_VERSION: v0.76.1
+  TRIVY_VERSION: v0.76.2
 
 jobs:
   trivy:
